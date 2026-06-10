@@ -1,0 +1,110 @@
+package ai.procurecopilot.backend.llm;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
+
+/**
+ * The single entry point for all Anthropic reasoning (PROCURE_COPILOT_PLAN.md §3.2). Every payload
+ * is secret-scrubbed before leaving the process. In stub mode (default for local/CI, or whenever no
+ * key is present) it dispatches to a deterministic {@link ClaudeResponder} per task so the whole
+ * agent loop is runnable offline.
+ */
+@Service
+public class ClaudeService {
+
+    private static final Logger log = LoggerFactory.getLogger(ClaudeService.class);
+
+    private final AnthropicProperties props;
+    private final SecretScrubber scrubber;
+    private final ObjectMapper mapper;
+    private final Map<String, ClaudeResponder> responders;
+    private final WebClient webClient;
+
+    public ClaudeService(
+            AnthropicProperties props,
+            SecretScrubber scrubber,
+            ObjectMapper mapper,
+            List<ClaudeResponder> stubResponders,
+            WebClient.Builder webClientBuilder) {
+        this.props = props;
+        this.scrubber = scrubber;
+        this.mapper = mapper;
+        this.responders = stubResponders.stream()
+                .collect(java.util.stream.Collectors.toMap(ClaudeResponder::task, r -> r, (a, b) -> a));
+        this.webClient = webClientBuilder.baseUrl(props.baseUrl()).build();
+    }
+
+    /** Run one reasoning call and return the model's text completion. */
+    public String complete(ClaudeRequest request) {
+        ClaudeRequest scrubbed = new ClaudeRequest(
+                request.task(),
+                scrubber.scrub(request.system()),
+                scrubber.scrub(request.user()),
+                request.maxTokens());
+
+        if (props.isStub()) {
+            ClaudeResponder responder = responders.get(scrubbed.task());
+            if (responder != null) {
+                return responder.respond(scrubbed);
+            }
+            log.debug("No stub responder for task '{}', returning empty object", scrubbed.task());
+            return "{}";
+        }
+        return callApi(scrubbed);
+    }
+
+    private String callApi(ClaudeRequest request) {
+        int maxTokens = request.maxTokens() != null ? request.maxTokens() : props.maxTokensOrDefault();
+        Map<String, Object> body = Map.of(
+                "model", props.model(),
+                "max_tokens", maxTokens,
+                "system", request.system() == null ? "" : request.system(),
+                "messages", List.of(Map.of("role", "user", "content", request.user())));
+        try {
+            String raw = webClient.post()
+                    .uri("/v1/messages")
+                    .header("x-api-key", props.apiKey())
+                    .header("anthropic-version", props.version())
+                    .header("content-type", "application/json")
+                    .bodyValue(body)
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .timeout(Duration.ofSeconds(60))
+                    .block();
+            return extractText(raw);
+        } catch (Exception e) {
+            throw new ClaudeException("Anthropic call failed for task " + request.task(), e);
+        }
+    }
+
+    private String extractText(String raw) {
+        try {
+            JsonNode root = mapper.readTree(raw);
+            JsonNode content = root.path("content");
+            if (content.isArray() && !content.isEmpty()) {
+                return content.get(0).path("text").asText("");
+            }
+            return "";
+        } catch (Exception e) {
+            throw new ClaudeException("Could not parse Anthropic response", e);
+        }
+    }
+
+    public boolean isStub() {
+        return props.isStub();
+    }
+
+    /** Thrown when a live Anthropic call or its parsing fails. */
+    public static class ClaudeException extends RuntimeException {
+        public ClaudeException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+}

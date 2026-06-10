@@ -1,0 +1,50 @@
+{
+  "name": "procure-copilot-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Procure Copilot — Android-first agentic procurement assistant (Ionic + Capacitor)",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "cap:sync": "cap sync android",
+    "adb:reverse": "\"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" reverse tcp:8080 tcp:8080 || true",
+    "android:emulator": "npm run build && cap sync android && npm run adb:reverse && cap run android",
+    "android:device": "npm run build && cap sync android && npm run adb:reverse && cap run android",
+    "android:debug": "VITE_DEBUG_AUTOMATION=1 npm run build && cap sync android && npm run adb:reverse && cap run android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.0",
+    "@capacitor/core": "^8.4.0",
+    "@capgo/capacitor-inappbrowser": "^8.6.20",
+    "@ionic/react": "^8.8.9",
+    "@ionic/react-router": "^8.8.9",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router": "^5.3.4",
+    "react-router-dom": "^5.3.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.0",
+    "@playwright/test": "^1.60.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/react-router": "^5.1.20",
+    "@types/react-router-dom": "^5.3.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^2.1.8",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

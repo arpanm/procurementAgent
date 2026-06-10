@@ -1,0 +1,20 @@
+node_modules/
+dist/
+target/
+.DS_Store
+build/
+*.log
+.env
+.env.local
+android/
+ios/
+.idea/
+*.iml
+coverage/
+.gradle/
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+playwright/.cache/

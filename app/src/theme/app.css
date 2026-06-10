@@ -1,0 +1,849 @@
+/**
+ * Procure Copilot custom component styling.
+ *
+ * Presentational-only classes consumed by the UI pages/components. Tokens come from
+ * theme/variables.css so everything respects light/dark automatically. Nothing here changes
+ * orchestration or test hooks — it only restyles markup.
+ */
+
+/* ---------------------------------------------------------------- Layout helpers */
+
+.pc-content {
+  --background: var(--ion-background-color);
+}
+
+.pc-scroll-pad {
+  /* Leave room for the sticky action bar so content is never hidden behind it. */
+  padding-bottom: 160px;
+}
+
+.pc-section {
+  margin: 18px 4px;
+}
+
+.pc-section-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--pc-text-muted);
+  margin: 0 0 10px 2px;
+}
+
+/* ---------------------------------------------------------------- Brand header */
+
+.pc-toolbar {
+  --background: var(--ion-toolbar-background);
+  --border-width: 0 !important;
+  --min-height: 60px;
+}
+
+.pc-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-inline: 6px;
+}
+
+.pc-brand__mark {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  overflow: hidden;
+  box-shadow: var(--pc-shadow-soft);
+  flex: 0 0 auto;
+}
+
+.pc-brand__name {
+  font-size: 1.06rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  color: var(--ion-text-color);
+}
+
+.pc-brand__sub {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--pc-text-muted);
+}
+
+/* ---------------------------------------------------------------- Hero / empty state */
+
+.pc-hero {
+  background: var(--pc-brand-gradient);
+  color: #fff;
+  border-radius: var(--pc-radius-lg);
+  padding: 26px 22px;
+  box-shadow: var(--pc-shadow-card);
+  margin: 8px 4px 18px;
+}
+
+.pc-hero__icon {
+  width: 52px;
+  height: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.16);
+  margin-bottom: 14px;
+}
+
+.pc-hero__title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.pc-hero__subtitle {
+  margin: 8px 0 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.pc-hero__examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.pc-hero__chip {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  backdrop-filter: blur(2px);
+}
+
+/* ---------------------------------------------------------------- Savings hero (comparison) */
+
+.pc-savings-hero {
+  background: var(--pc-savings-gradient);
+  color: #fff;
+  border-radius: var(--pc-radius-lg);
+  padding: 24px 22px;
+  box-shadow: var(--pc-shadow-card);
+  margin: 8px 4px 18px;
+  text-align: center;
+}
+
+.pc-savings-hero--flat {
+  background: var(--pc-surface-raised);
+  color: var(--ion-text-color);
+  border: 1px solid var(--ion-border-color);
+}
+
+.pc-savings-hero__label {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+
+.pc-savings-hero__amount {
+  margin: 6px 0 4px;
+  font-size: 2.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+
+.pc-savings-hero__sub {
+  margin: 0;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+/* ---------------------------------------------------------------- Cards */
+
+.pc-card {
+  background: var(--pc-surface-raised);
+  border: 1px solid var(--ion-border-color);
+  border-radius: var(--pc-radius-md);
+  box-shadow: var(--pc-shadow-card);
+  margin: 0 4px 14px;
+  overflow: hidden;
+}
+
+.pc-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--ion-border-color);
+}
+
+.pc-card__body {
+  padding: 6px 16px 14px;
+}
+
+.pc-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--pc-surface-muted);
+  font-size: 0.9rem;
+}
+
+/* ---------------------------------------------------------------- Platform pill / badge */
+
+.pc-platform {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pc-platform__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+
+.pc-platform__name {
+  font-weight: 800;
+  font-size: 1.02rem;
+  text-transform: capitalize;
+  letter-spacing: -0.01em;
+}
+
+.pc-platform-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: var(--pc-surface-muted);
+  color: var(--ion-text-color);
+  border: 1px solid var(--ion-border-color);
+}
+
+/* Per-platform accent dots. */
+.pc-platform--hyperpure .pc-platform__dot,
+.pc-platform-pill--hyperpure .pc-platform__dot {
+  background: #1b8e5a;
+}
+.pc-platform--amazon .pc-platform__dot,
+.pc-platform-pill--amazon .pc-platform__dot {
+  background: #f59e0b;
+}
+
+.pc-delivery {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--pc-text-muted);
+}
+
+/* ---------------------------------------------------------------- Money emphasis */
+
+.pc-money {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.pc-money--strong {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.pc-money--save {
+  color: var(--ion-color-success);
+}
+
+/* ---------------------------------------------------------------- Item / line rows */
+
+.pc-line {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--ion-border-color);
+}
+
+.pc-line:last-child {
+  border-bottom: 0;
+}
+
+.pc-line__main {
+  min-width: 0;
+}
+
+.pc-line__name {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.pc-line__reason {
+  margin: 3px 0 0;
+  font-size: 0.84rem;
+  line-height: 1.4;
+  color: var(--pc-text-muted);
+}
+
+.pc-line__price {
+  flex: 0 0 auto;
+  font-size: 0.98rem;
+  text-align: right;
+}
+
+.pc-line__meta {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  font-weight: 600;
+  color: var(--ion-color-primary);
+}
+
+/* ---------------------------------------------------------- Item refinement inputs */
+
+.pc-refinements {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--ion-border-color);
+}
+
+.pc-refinements__field {
+  --background: var(--pc-surface-raised);
+  --padding-start: 10px;
+  --padding-end: 10px;
+  --padding-top: 6px;
+  --padding-bottom: 6px;
+  border: 1px solid var(--ion-border-color);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  min-height: 44px;
+}
+
+/* ---------------------------------------------------------------- Quantity stepper */
+
+.pc-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--ion-border-color);
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--pc-surface-raised);
+}
+
+.pc-stepper ion-button {
+  --padding-start: 12px;
+  --padding-end: 12px;
+  height: 36px;
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.pc-stepper__value {
+  min-width: 34px;
+  text-align: center;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- Chips */
+
+.pc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 4px 16px;
+}
+
+.pc-chip {
+  --background: var(--pc-surface-muted);
+  --color: var(--ion-text-color);
+  border: 1px solid var(--ion-border-color);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- Composer (chat input) */
+
+.pc-composer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--pc-surface-raised);
+  border: 1px solid var(--ion-border-color);
+  border-radius: 999px;
+  padding: 4px 4px 4px 18px;
+  box-shadow: var(--pc-shadow-card);
+  margin: 0 4px;
+}
+
+.pc-composer__input {
+  flex: 1 1 auto;
+  --padding-start: 0;
+  --padding-top: 12px;
+  --padding-bottom: 12px;
+}
+
+.pc-iconbtn {
+  --border-radius: 50%;
+  --padding-start: 0;
+  --padding-end: 0;
+  width: 46px;
+  height: 46px;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.pc-sendbtn {
+  --padding-start: 18px;
+  --padding-end: 18px;
+  height: 46px;
+  margin: 0;
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.pc-mic--listening {
+  animation: pc-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pc-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(var(--ion-color-danger-rgb), 0.5);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 10px rgba(var(--ion-color-danger-rgb), 0);
+  }
+}
+
+.pc-listening-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  margin: 12px 0 0;
+  font-weight: 600;
+  color: var(--ion-color-danger);
+}
+
+.pc-listening-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ion-color-danger);
+  animation: pc-blink 1s ease-in-out infinite;
+}
+
+@keyframes pc-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* ---------------------------------------------------------------- Inline notes / banners */
+
+.pc-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: var(--pc-radius-sm);
+  padding: 12px 14px;
+  margin: 12px 4px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.pc-banner--error {
+  background: rgba(var(--ion-color-danger-rgb), 0.1);
+  color: var(--ion-color-danger);
+  border: 1px solid rgba(var(--ion-color-danger-rgb), 0.25);
+}
+
+/* ---------------------------------------------------------------- Automation debug overlay */
+.pc-debug {
+  position: fixed;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  max-height: 42vh;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(13, 17, 23, 0.94);
+  color: #d7e0ea;
+  border: 1px solid rgba(120, 140, 170, 0.35);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.pc-debug--collapsed {
+  max-height: none;
+}
+
+.pc-debug__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: rgba(30, 38, 50, 0.95);
+  border-bottom: 1px solid rgba(120, 140, 170, 0.25);
+}
+
+.pc-debug__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pc-debug__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3fb950;
+  box-shadow: 0 0 8px #3fb950;
+  animation: pc-debug-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pc-debug-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.pc-debug__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.pc-debug__btn {
+  background: rgba(120, 140, 170, 0.18);
+  color: #c8d3df;
+  border: 1px solid rgba(120, 140, 170, 0.3);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pc-debug__btn--primary {
+  background: rgba(63, 185, 80, 0.18);
+  color: #7ee787;
+  border-color: rgba(63, 185, 80, 0.4);
+}
+
+.pc-debug__body {
+  overflow-y: auto;
+  padding: 6px 8px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pc-debug__empty {
+  opacity: 0.6;
+  padding: 8px 2px;
+}
+
+.pc-debug__line {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pc-debug__t { color: #6b7787; flex: none; }
+.pc-debug__lvl { flex: none; width: 1.4em; text-align: center; opacity: 0.9; }
+.pc-debug__plat { color: #d29922; flex: none; }
+.pc-debug__msg { flex: 1 1 auto; }
+
+.pc-debug__line--think .pc-debug__msg { color: #a9b4c0; }
+.pc-debug__line--info .pc-debug__lvl { color: #3fb950; }
+.pc-debug__line--warn .pc-debug__msg,
+.pc-debug__line--warn .pc-debug__lvl { color: #e3b341; }
+.pc-debug__line--error .pc-debug__msg,
+.pc-debug__line--error .pc-debug__lvl { color: #f85149; }
+
+.pc-banner__detail {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.72rem;
+  line-height: 1.3;
+  opacity: 0.85;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+
+.pc-banner--warn {
+  background: rgba(var(--ion-color-warning-rgb), 0.12);
+  color: var(--ion-color-warning-shade);
+  border: 1px solid rgba(var(--ion-color-warning-rgb), 0.3);
+}
+
+.pc-banner--info {
+  background: rgba(var(--ion-color-primary-rgb), 0.08);
+  color: var(--ion-text-color);
+  border: 1px solid rgba(var(--ion-color-primary-rgb), 0.2);
+}
+
+.pc-banner--success {
+  background: rgba(var(--ion-color-success-rgb), 0.12);
+  color: var(--ion-color-success-shade);
+  border: 1px solid rgba(var(--ion-color-success-rgb), 0.3);
+}
+
+/* ---------------------------------------------------------------- Sticky action bar */
+
+.pc-sticky-bar {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  background: var(--pc-surface-raised);
+  border-top: 1px solid var(--ion-border-color);
+  box-shadow: var(--pc-shadow-bar);
+  z-index: 10;
+}
+
+.pc-sticky-bar__row {
+  display: flex;
+  gap: 10px;
+}
+
+.pc-sticky-bar__row ion-button {
+  flex: 1 1 0;
+  margin: 0;
+}
+
+.pc-cta {
+  --border-radius: 14px;
+  --padding-top: 18px;
+  --padding-bottom: 18px;
+  font-weight: 700;
+  font-size: 1rem;
+  margin: 0;
+  text-transform: none;
+}
+
+/* ---------------------------------------------------------------- Hand-off (OTP/payment) */
+
+.pc-handoff-card {
+  background: var(--pc-surface-raised);
+  border: 1px solid var(--ion-border-color);
+  border-radius: var(--pc-radius-lg);
+  box-shadow: var(--pc-shadow-card);
+  padding: 24px 20px;
+  margin: 10px 4px 16px;
+  text-align: center;
+}
+
+.pc-handoff-card__icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--ion-color-primary-rgb), 0.12);
+  color: var(--ion-color-primary);
+  margin-bottom: 14px;
+}
+
+.pc-handoff-card__platform {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
+.pc-handoff-card__prompt {
+  margin: 8px auto 0;
+  max-width: 30ch;
+  font-size: 0.98rem;
+  line-height: 1.5;
+  color: var(--ion-text-color);
+}
+
+.pc-amount-chip {
+  display: inline-block;
+  margin-top: 16px;
+  padding: 12px 20px;
+  border-radius: 14px;
+  background: rgba(var(--ion-color-primary-rgb), 0.1);
+  color: var(--ion-color-primary);
+  font-size: 1.5rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.pc-trust-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  margin: 16px 8px 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--pc-text-muted);
+}
+
+/* ---------------------------------------------------------------- Success summary */
+
+.pc-success-hero {
+  text-align: center;
+  padding: 26px 20px 8px;
+}
+
+.pc-success-hero__badge {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--ion-color-success-rgb), 0.14);
+  color: var(--ion-color-success);
+  margin-bottom: 14px;
+}
+
+.pc-success-hero__title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 800;
+}
+
+.pc-success-hero__sub {
+  margin: 6px 0 0;
+  color: var(--pc-text-muted);
+}
+
+.pc-grandtotal {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  margin: 4px 4px 14px;
+  border-radius: var(--pc-radius-md);
+  background: var(--pc-surface-muted);
+  border: 1px solid var(--ion-border-color);
+}
+
+.pc-grandtotal__label {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--pc-text-muted);
+}
+
+.pc-grandtotal__value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- Loading / spinner */
+
+.pc-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  text-align: center;
+  min-height: 70vh;
+  padding: 24px;
+}
+
+.pc-loading__spinner {
+  width: 56px;
+  height: 56px;
+  color: var(--ion-color-primary);
+}
+
+.pc-loading__title {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 800;
+}
+
+.pc-loading__step {
+  margin: 0;
+  color: var(--pc-text-muted);
+  font-size: 0.95rem;
+}
+
+.pc-loading__platforms {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------- Skeletons */
+
+.pc-skeleton {
+  border-radius: var(--pc-radius-md);
+  background: linear-gradient(
+    100deg,
+    var(--pc-skeleton-base) 30%,
+    var(--pc-skeleton-sheen) 50%,
+    var(--pc-skeleton-base) 70%
+  );
+  background-size: 200% 100%;
+  animation: pc-shimmer 1.4s ease-in-out infinite;
+}
+
+.pc-skeleton-card {
+  height: 132px;
+  margin: 0 4px 14px;
+}
+
+.pc-skeleton-line {
+  height: 14px;
+  margin: 0 0 10px;
+}
+
+@keyframes pc-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pc-skeleton,
+  .pc-mic--listening,
+  .pc-listening-dot {
+    animation: none;
+  }
+}

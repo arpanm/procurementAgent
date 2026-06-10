@@ -1,0 +1,159 @@
+/**
+ * Core domain entities for Procure Copilot.
+ *
+ * Mirrors the data model in PROCURE_COPILOT_PLAN.md §7. These are the shared contracts that the
+ * conversation layer, automation engine, adapters, optimizer and HITL/checkout layers all speak,
+ * so they are intentionally platform-count-agnostic (§10).
+ */
+
+/** Platforms supported in the MVP. Designed-for extension: add more without touching the core. */
+export type PlatformId = "hyperpure" | "amazon";
+
+export const SUPPORTED_PLATFORMS: readonly PlatformId[] = ["hyperpure", "amazon"] as const;
+
+/** A unit of measure as understood by the slot parser and optimizer. */
+export type Unit = "kg" | "g" | "l" | "ml" | "piece" | "packet" | "carton" | "dozen";
+
+/** A single line item a retailer asked for, after intent/slot extraction (Epic 1). */
+export interface RequestedItem {
+  /** Raw text the user said/typed for this item, e.g. "5 kilo aloo". */
+  readonly raw: string;
+  /** Normalized canonical name, e.g. "potato", "basmati rice". */
+  readonly name: string;
+  /**
+   * Count of {@link packSize}-sized packs to buy. For "5 packets of 1kg basmati", this is 5 and
+   * {@link unit} is "packet"; for loose "2 kg potato" it is 2 and unit is "kg".
+   */
+  readonly qty: number;
+  readonly unit: Unit;
+  /** Brand the retailer asked for, if any, e.g. "India Gate", "Tata". */
+  readonly brand?: string;
+  /** Product variant/grade, e.g. "basmati", "lite", "refined", "full cream". */
+  readonly variant?: string;
+  /** Size of each pack/unit purchased, e.g. "1 kg", "500 g", "1 L". {@link qty}/{@link unit} carry the count. */
+  readonly packSize?: string;
+  /** Optional free-form constraints, e.g. "refined", brand preferences. */
+  readonly notes?: string;
+}
+
+/** The structured procurement request opened as a session (§3.6.2). */
+export interface ProcurementRequest {
+  readonly id: string;
+  readonly items: readonly RequestedItem[];
+  /** Locale of the originating utterance, e.g. "hi-IN", "bn-IN", "en-IN". */
+  readonly locale?: string;
+  readonly createdAt: string;
+}
+
+/** A canonical item that maps across platforms (§7 SKU normalization). */
+export interface CanonicalItem {
+  readonly id: string;
+  readonly name: string;
+  readonly unit: Unit;
+  readonly synonyms: readonly string[];
+  readonly category?: string;
+}
+
+/** A platform-specific SKU mapped to a canonical item. */
+export interface PlatformSKU {
+  readonly platform: PlatformId;
+  readonly canonicalItemId: string;
+  readonly skuId: string;
+  readonly title: string;
+  readonly packSize: string;
+  /** 0..1 confidence of the mapping; low confidence is flagged for human review. */
+  readonly mappingConfidence: number;
+}
+
+/** A live quote read off a platform for a SKU (§7). Prices are in paise to avoid float drift. */
+export interface Quote {
+  readonly platform: PlatformId;
+  readonly skuId: string;
+  readonly canonicalItemId: string;
+  readonly title: string;
+  /** Unit price in paise (₹1 = 100 paise). */
+  readonly pricePaise: number;
+  /** MRP in paise, if shown. */
+  readonly mrpPaise?: number;
+  readonly inStock: boolean;
+  /** How many units are purchasable, if the platform caps it. */
+  readonly stockCap?: number;
+  readonly deliveryDate?: string;
+  /** Minimum order value for the platform, in paise. */
+  readonly movPaise?: number;
+  /** Delivery fee for the platform, in paise. */
+  readonly deliveryFeePaise?: number;
+  readonly readAt: string;
+}
+
+/** Per-platform account state (§7). Sessions live on-device only; never sent to the backend. */
+export interface PlatformAccount {
+  readonly platform: PlatformId;
+  readonly loggedIn: boolean;
+  /** Available credit in paise, if the platform exposes a credit line. */
+  readonly creditAvailablePaise?: number;
+}
+
+/** One line of an optimizer allocation: buy `qty` of an item on a platform, with a reason. */
+export interface AllocationLine {
+  readonly canonicalItemId: string;
+  readonly itemName: string;
+  readonly platform: PlatformId;
+  readonly skuId: string;
+  readonly qty: number;
+  readonly unitPricePaise: number;
+  readonly lineTotalPaise: number;
+  /** Plain-language reason shown to the retailer, e.g. "cheaper on Hyperpure by ₹38". */
+  readonly reason: string;
+}
+
+/** Per-platform rollup within an allocation. */
+export interface PlatformAllocation {
+  readonly platform: PlatformId;
+  readonly lines: readonly AllocationLine[];
+  readonly subtotalPaise: number;
+  readonly deliveryFeePaise: number;
+  readonly totalPaise: number;
+  /** True if this platform's subtotal meets its MOV. */
+  readonly meetsMov: boolean;
+  /** True if the order can be placed on available credit. */
+  readonly payableOnCredit: boolean;
+}
+
+/** A full optimizer result with an explainable rupee P&L (§4). */
+export interface Allocation {
+  readonly perPlatform: readonly PlatformAllocation[];
+  readonly grandTotalPaise: number;
+  /** Cheapest single-platform baseline total, in paise, for the "vs naive" comparison. */
+  readonly singlePlatformBaselinePaise: number;
+  /** grandTotal − baseline; negative means we saved money. */
+  readonly savingPaise: number;
+  /** Items that could not be sourced anywhere. */
+  readonly unfulfilled: readonly { canonicalItemId: string; itemName: string; reason: string }[];
+}
+
+/** Status of an attempt to place an order on one platform (§7). */
+export type OrderStatus =
+  | "pending"
+  | "cart_filled"
+  | "needs_otp"
+  | "needs_payment"
+  | "placed"
+  | "failed";
+
+export interface OrderAttempt {
+  readonly platform: PlatformId;
+  readonly status: OrderStatus;
+  readonly totalPaise: number;
+  readonly paidOnCredit: boolean;
+  readonly orderRef?: string;
+  readonly idempotencyKey: string;
+  readonly startedAt: string;
+  readonly updatedAt: string;
+}
+
+/** Helper to format paise as a ₹ string for narration/UX. */
+export function formatRupees(paise: number): string {
+  const rupees = paise / 100;
+  return `₹${rupees.toLocaleString("en-IN", { maximumFractionDigits: 2 })}`;
+}

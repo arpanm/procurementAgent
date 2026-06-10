@@ -1,0 +1,219 @@
+/**
+ * Procure Copilot theme tokens.
+ *
+ * Brand direction (PROCURE_COPILOT_PLAN.md §1): an Android-first, money-saving procurement
+ * assistant for Indian kirana/HoReCa owners. The palette is built around a confident deep
+ * indigo primary (trust + focus) with an emerald "savings" green, a warm saffron accent, and
+ * neutral slate steps. Light is the default; dark mode follows the OS via prefers-color-scheme
+ * and can also be forced with the `.ion-palette-dark` class.
+ */
+
+:root {
+  /* ---- Primary: deep indigo (trust, focus) ---- */
+  --ion-color-primary: #4f46e5;
+  --ion-color-primary-rgb: 79, 70, 229;
+  --ion-color-primary-contrast: #ffffff;
+  --ion-color-primary-contrast-rgb: 255, 255, 255;
+  --ion-color-primary-shade: #4640ca;
+  --ion-color-primary-tint: #6159e8;
+
+  /* ---- Secondary: deep teal ---- */
+  --ion-color-secondary: #0d9488;
+  --ion-color-secondary-rgb: 13, 148, 136;
+  --ion-color-secondary-contrast: #ffffff;
+  --ion-color-secondary-contrast-rgb: 255, 255, 255;
+  --ion-color-secondary-shade: #0b8278;
+  --ion-color-secondary-tint: #259f94;
+
+  /* ---- Tertiary: warm saffron accent ---- */
+  --ion-color-tertiary: #f59e0b;
+  --ion-color-tertiary-rgb: 245, 158, 11;
+  --ion-color-tertiary-contrast: #1a1300;
+  --ion-color-tertiary-contrast-rgb: 26, 19, 0;
+  --ion-color-tertiary-shade: #d88b0a;
+  --ion-color-tertiary-tint: #f6a823;
+
+  /* ---- Success: emerald (savings) ---- */
+  --ion-color-success: #16a34a;
+  --ion-color-success-rgb: 22, 163, 74;
+  --ion-color-success-contrast: #ffffff;
+  --ion-color-success-contrast-rgb: 255, 255, 255;
+  --ion-color-success-shade: #138f41;
+  --ion-color-success-tint: #2dac5c;
+
+  /* ---- Warning: amber ---- */
+  --ion-color-warning: #f59e0b;
+  --ion-color-warning-rgb: 245, 158, 11;
+  --ion-color-warning-contrast: #1a1300;
+  --ion-color-warning-contrast-rgb: 26, 19, 0;
+  --ion-color-warning-shade: #d88b0a;
+  --ion-color-warning-tint: #f6a823;
+
+  /* ---- Danger: red ---- */
+  --ion-color-danger: #ef4444;
+  --ion-color-danger-rgb: 239, 68, 68;
+  --ion-color-danger-contrast: #ffffff;
+  --ion-color-danger-contrast-rgb: 255, 255, 255;
+  --ion-color-danger-shade: #d23c3c;
+  --ion-color-danger-tint: #f15757;
+
+  /* ---- Dark ---- */
+  --ion-color-dark: #1e293b;
+  --ion-color-dark-rgb: 30, 41, 59;
+  --ion-color-dark-contrast: #ffffff;
+  --ion-color-dark-contrast-rgb: 255, 255, 255;
+  --ion-color-dark-shade: #1a2333;
+  --ion-color-dark-tint: #353e4f;
+
+  /* ---- Medium: slate ---- */
+  --ion-color-medium: #64748b;
+  --ion-color-medium-rgb: 100, 116, 139;
+  --ion-color-medium-contrast: #ffffff;
+  --ion-color-medium-contrast-rgb: 255, 255, 255;
+  --ion-color-medium-shade: #58667a;
+  --ion-color-medium-tint: #748297;
+
+  /* ---- Light ---- */
+  --ion-color-light: #f1f5f9;
+  --ion-color-light-rgb: 241, 245, 249;
+  --ion-color-light-contrast: #1e293b;
+  --ion-color-light-contrast-rgb: 30, 41, 59;
+  --ion-color-light-shade: #d4d8db;
+  --ion-color-light-tint: #f2f6fa;
+
+  /* ---- Brand surface tokens (consumed by app.css) ---- */
+  --pc-brand-gradient: linear-gradient(135deg, #4f46e5 0%, #6d28d9 100%);
+  --pc-savings-gradient: linear-gradient(135deg, #16a34a 0%, #0d9488 100%);
+  --pc-radius-lg: 20px;
+  --pc-radius-md: 14px;
+  --pc-radius-sm: 10px;
+  --pc-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06), 0 8px 24px rgba(15, 23, 42, 0.08);
+  --pc-shadow-soft: 0 1px 3px rgba(15, 23, 42, 0.08);
+  --pc-shadow-bar: 0 -8px 24px rgba(15, 23, 42, 0.1);
+
+  /* ---- App font ---- */
+  --ion-font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", system-ui, sans-serif;
+}
+
+/* ---------- Light palette (default) ---------- */
+:root {
+  --ion-background-color: #f4f5fb;
+  --ion-background-color-rgb: 244, 245, 251;
+
+  --ion-text-color: #0f172a;
+  --ion-text-color-rgb: 15, 23, 42;
+
+  --ion-toolbar-background: #ffffff;
+  --ion-toolbar-color: #0f172a;
+  --ion-item-background: #ffffff;
+  --ion-card-background: #ffffff;
+  --ion-tab-bar-background: #ffffff;
+
+  --ion-border-color: #e2e8f0;
+
+  --pc-surface-muted: #eef0f8;
+  --pc-surface-raised: #ffffff;
+  --pc-text-muted: #64748b;
+  --pc-skeleton-base: #e6e9f2;
+  --pc-skeleton-sheen: #f3f5fb;
+
+  --ion-color-step-50: #f5f6fa;
+  --ion-color-step-100: #eceef5;
+  --ion-color-step-150: #e2e5ef;
+  --ion-color-step-200: #d9dce9;
+  --ion-color-step-250: #cfd3e3;
+  --ion-color-step-300: #c5cadd;
+  --ion-color-step-350: #bbc1d7;
+  --ion-color-step-400: #b2b8d2;
+  --ion-color-step-500: #9ea7bf;
+  --ion-color-step-600: #7e889f;
+  --ion-color-step-700: #5e6980;
+  --ion-color-step-800: #3e4a60;
+  --ion-color-step-900: #1e2a40;
+}
+
+/* ---------- Dark palette ---------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ion-background-color: #0b1020;
+    --ion-background-color-rgb: 11, 16, 32;
+
+    --ion-text-color: #f1f5f9;
+    --ion-text-color-rgb: 241, 245, 249;
+
+    --ion-toolbar-background: #131a2e;
+    --ion-toolbar-color: #f1f5f9;
+    --ion-item-background: #161e34;
+    --ion-card-background: #161e34;
+    --ion-tab-bar-background: #131a2e;
+
+    --ion-border-color: #28324d;
+
+    --pc-surface-muted: #1b2440;
+    --pc-surface-raised: #161e34;
+    --pc-text-muted: #94a3b8;
+    --pc-skeleton-base: #1f2942;
+    --pc-skeleton-sheen: #2a3658;
+    --pc-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.45);
+    --pc-shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.4);
+    --pc-shadow-bar: 0 -8px 24px rgba(0, 0, 0, 0.5);
+
+    --ion-color-primary: #818cf8;
+    --ion-color-primary-rgb: 129, 140, 248;
+    --ion-color-primary-contrast: #0b1020;
+    --ion-color-primary-contrast-rgb: 11, 16, 32;
+    --ion-color-primary-shade: #727bda;
+    --ion-color-primary-tint: #8f98f9;
+
+    --ion-color-success: #22c55e;
+    --ion-color-success-rgb: 34, 197, 94;
+    --ion-color-success-shade: #1eae53;
+    --ion-color-success-tint: #38cb6e;
+
+    --ion-color-light: #1b2440;
+    --ion-color-light-rgb: 27, 36, 64;
+    --ion-color-light-contrast: #f1f5f9;
+    --ion-color-light-contrast-rgb: 241, 245, 249;
+    --ion-color-light-shade: #182038;
+    --ion-color-light-tint: #323a5a;
+
+    --ion-color-medium: #94a3b8;
+    --ion-color-medium-rgb: 148, 163, 184;
+
+    --pc-brand-gradient: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
+    --pc-savings-gradient: linear-gradient(135deg, #15803d 0%, #0f766e 100%);
+
+    --ion-color-step-50: #131a2e;
+    --ion-color-step-100: #18203a;
+    --ion-color-step-150: #1d2745;
+    --ion-color-step-200: #222d50;
+    --ion-color-step-250: #27345b;
+    --ion-color-step-300: #2c3a66;
+    --ion-color-step-350: #324171;
+    --ion-color-step-400: #37487c;
+    --ion-color-step-500: #4a5c91;
+    --ion-color-step-600: #6677a8;
+    --ion-color-step-700: #8a98be;
+    --ion-color-step-800: #b1bbd4;
+    --ion-color-step-900: #dee3ee;
+  }
+}
+
+/* ---------- Forced dark palette (class-based, mirrors the media query) ---------- */
+.ion-palette-dark {
+  --ion-background-color: #0b1020;
+  --ion-background-color-rgb: 11, 16, 32;
+  --ion-text-color: #f1f5f9;
+  --ion-text-color-rgb: 241, 245, 249;
+  --ion-toolbar-background: #131a2e;
+  --ion-toolbar-color: #f1f5f9;
+  --ion-item-background: #161e34;
+  --ion-card-background: #161e34;
+  --ion-border-color: #28324d;
+  --pc-surface-muted: #1b2440;
+  --pc-surface-raised: #161e34;
+  --pc-text-muted: #94a3b8;
+  --pc-skeleton-base: #1f2942;
+  --pc-skeleton-sheen: #2a3658;
+}

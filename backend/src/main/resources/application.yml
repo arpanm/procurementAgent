@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: procure-copilot-backend
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# Anthropic configuration. The API key is supplied via environment only and never logged.
+anthropic:
+  base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+  api-key: ${ANTHROPIC_API_KEY:}
+  version: ${ANTHROPIC_VERSION:2023-06-01}
+  # A single strong model serves planner, grounder, intent and verifier in MVP (no tiering).
+  model: ${ANTHROPIC_MODEL:claude-opus-4-20250514}
+  max-tokens: ${ANTHROPIC_MAX_TOKENS:2048}
+  # When true (default for local/test), the proxy returns deterministic stub completions instead
+  # of calling the live API. Lets the whole agent loop run in CI without a key.
+  stub-mode: ${ANTHROPIC_STUB_MODE:true}
+
+procure:
+  optimizer:
+    # Price tolerance (fraction) the verifier allows between approved plan and live cart.
+    price-tolerance: 0.05
+  cors:
+    # Comma-separated allowed origin patterns for the device app (Vite dev server + Capacitor
+    # WebView). Permissive by default for local dev; restrict to your app origins in production.
+    allowed-origins: ${PROCURE_CORS_ALLOWED_ORIGINS:*}

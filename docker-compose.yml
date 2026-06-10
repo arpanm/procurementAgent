@@ -1,0 +1,23 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: procure-copilot-backend:latest
+    container_name: procure-copilot-backend
+    ports:
+      - "8080:8080"
+    environment:
+      # Anthropic — leave STUB_MODE=true to run offline without a key.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_STUB_MODE: ${ANTHROPIC_STUB_MODE:-true}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-20250514}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
+      ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-2048}
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
