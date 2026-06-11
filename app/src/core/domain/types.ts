@@ -76,6 +76,8 @@ export interface Quote {
   /** MRP in paise, if shown. */
   readonly mrpPaise?: number;
   readonly inStock: boolean;
+  /** Absolute product detail-page URL, so checkout can re-open the exact product to add it to cart. */
+  readonly productUrl?: string;
   /** How many units are purchasable, if the platform caps it. */
   readonly stockCap?: number;
   readonly deliveryDate?: string;

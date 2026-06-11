@@ -102,6 +102,7 @@ export type FetchLike = (
     method?: string;
     headers?: Record<string, string>;
     body?: string;
+    signal?: AbortSignal;
   },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
 
@@ -147,6 +148,13 @@ export class HttpBackendClient implements BackendClient {
     private readonly fetchImpl: FetchLike = (input, init) =>
       fetch(input, init as RequestInit) as unknown as ReturnType<FetchLike>,
     private readonly probeImpl: ProbeLike = defaultProbe,
+    /**
+     * Hard ceiling per request. Without it, a fetch that stalls on the device's flaky network (the
+     * "Failed to fetch" / dropped-tunnel symptoms) hangs forever — which froze the checkout driver mid-run
+     * so its `finally { engine.close() }` never fired and the WebView stayed on screen. 45s comfortably
+     * clears the slowest legitimate call (Claude `next-action` ~9s, vision ~5s) while killing a true hang.
+     */
+    private readonly timeoutMs = 45_000,
   ) {
     const list = (typeof baseUrl === "string" ? [baseUrl] : [...baseUrl])
       .map((u) => u.replace(/\/+$/, ""))
@@ -182,11 +190,14 @@ export class HttpBackendClient implements BackendClient {
     const base = await this.resolveBase();
     let res;
     try {
-      res = await this.fetchImpl(`${base}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      res = await this.withTimeout(path, (signal) =>
+        this.fetchImpl(`${base}${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal,
+        }),
+      );
     } catch (err) {
       this.onTransportError();
       throw err;
@@ -201,7 +212,9 @@ export class HttpBackendClient implements BackendClient {
     const base = await this.resolveBase();
     let res;
     try {
-      res = await this.fetchImpl(`${base}${path}`);
+      res = await this.withTimeout(path, (signal) =>
+        this.fetchImpl(`${base}${path}`, { signal }),
+      );
     } catch (err) {
       this.onTransportError();
       throw err;
@@ -210,6 +223,29 @@ export class HttpBackendClient implements BackendClient {
       throw new Error(`Backend ${path} failed with status ${res.status}`);
     }
     return (await res.json()) as T;
+  }
+
+  /**
+   * Run a fetch under an abort-on-timeout guard so a stalled request can never hang the caller forever
+   * (which previously froze the checkout driver and left the WebView open). Translates an abort into a
+   * clear, throwable error. The mock `fetchImpl` used in tests ignores `signal`, so this is a no-op there.
+   */
+  private async withTimeout(
+    path: string,
+    run: (signal: AbortSignal) => ReturnType<FetchLike>,
+  ): ReturnType<FetchLike> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      return await run(controller.signal);
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new Error(`Backend ${path} timed out after ${this.timeoutMs}ms`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   intent(req: IntentRequest): Promise<IntentResponse> {

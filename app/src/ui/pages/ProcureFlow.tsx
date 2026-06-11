@@ -22,6 +22,7 @@ import type { AutomationEngine } from "../../core/automation/AutomationEngine";
 import { MockAutomationEngine } from "../../core/automation/__mocks__/MockAutomationEngine";
 import { createEngine } from "../../core/adapters";
 import { CheckoutDriver } from "../../core/checkout/CheckoutDriver";
+import { VerifierClient } from "../../core/checkout/VerifierClient";
 import { AuditLog } from "../../core/audit/AuditLog";
 import { InMemorySecureStore } from "../../core/secure/SecureStore";
 import type { DomainEvent } from "../../core/automation/events";
@@ -234,11 +235,16 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         });
       }
       // Give SPA listings a few seconds to lazy-load priced tiles before readProduct extracts, and
-      // (Hyperpure only) fall back to a screenshot + vision read when its large grid DOM can't be
-      // serialized over the bridge reliably.
+      // fall back to a screenshot + vision read when DOM extraction can't resolve the product: on
+      // Hyperpure the grid DOM is too large to serialize reliably; on Amazon the title often uses a
+      // synonym (search "chicken legs" → product titled "Drumsticks") that token matching misses, so
+      // once Claude has navigated to the chosen product, vision reads its price from the page.
       return createEngine(platform, bridge(), backend, {
         listingSettleMs: 8000,
-        visionFallback: platform === "hyperpure",
+        visionFallback: true,
+        // Amazon streams the cart body after its page "settles", so clearCart/getCart must wait for the
+        // real cart to render instead of reading the bare shell (which falsely reported an empty cart).
+        cartLoadMs: 8000,
       });
     },
     [props.createEngineImpl, isDemo, backend, bridge, orchestrator],
@@ -397,18 +403,47 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         humanResolverRef.current = resolve;
       });
 
+    const showWebView = isAutomationDebug();
     const collected: OrderAttempt[] = [];
     for (const platformAllocation of allocation.perPlatform) {
       if (platformAllocation.lines.length === 0) {
         continue;
       }
+      // Detail-page URLs captured while pricing this platform, so checkout re-opens the exact product
+      // and adds it directly (no re-search), keyed by the canonicalItemId the optimizer's lines use.
+      const productUrls = new Map<string, string>();
+      for (const q of orchestrator.getState().quotes) {
+        if (q.platform === platformAllocation.platform && q.productUrl) {
+          productUrls.set(q.canonicalItemId, q.productUrl);
+        }
+      }
       const engine = engineFor(platformAllocation.platform);
-      const driver = new CheckoutDriver({ engine, backend, audit, onEvent, awaitHuman });
+      const driver = new CheckoutDriver({
+        engine,
+        backend,
+        audit,
+        onEvent,
+        awaitHuman,
+        items: orchestrator.getState().items,
+        productUrls,
+        showWebView,
+        // Allow a small per-unit drift between the priced read and the cart (B2B prices wobble by a
+        // rupee or two; vision reads round). Still blocks real mismatches, wrong SKUs and wrong qty.
+        verifier: new VerifierClient(backend, { tolerancePaise: 500 }),
+      });
       try {
         const attempt = await driver.run(platformAllocation);
         collected.push(attempt);
       } catch {
         // The driver already emitted StepFailed; keep going with other platforms.
+      } finally {
+        // Dismiss the platform's WebView once checkout finishes (success or failure) so we "come out"
+        // of the browser instead of leaving the cart page hanging on screen.
+        try {
+          await engine.close();
+        } catch {
+          /* best-effort */
+        }
       }
     }
     setAttempts(collected);

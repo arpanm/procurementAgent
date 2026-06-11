@@ -126,6 +126,16 @@ class IntentServiceTest {
     }
 
     @Test
+    void brandedItemWithBareWeight_treatsWeightAsPackSizeNotQuantity() {
+        // "milky mist paneer 500 g" must NOT become qty=500 g — the weight is the pack size, qty=1.
+        Domain.RequestedItem paneer = find(ruleOnly.ruleParse("milky mist paneer 500 g"), "paneer");
+        assertThat(paneer.brand()).isEqualTo("Milky Mist");
+        assertThat(paneer.qty()).isEqualTo(1);
+        assertThat(paneer.unit()).isEqualTo("packet");
+        assertThat(paneer.packSize()).isEqualTo("500 g");
+    }
+
+    @Test
     void unknownLeadingBrand_isCapturedByHeuristic() {
         Domain.RequestedItem rice = find(ruleOnly.ruleParse("1 kg kanaka rice 2 packets"), "rice");
         assertThat(rice.brand()).isEqualTo("Kanaka");

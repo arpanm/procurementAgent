@@ -6,14 +6,18 @@ import {
   detectOtp,
   detectPayment,
   detectReloginNeeded,
+  findCartRemoveControl,
   findNearbyPriceEl,
+  findQuantitySelector,
   findResultCard,
+  isProductHref,
   parseDeliveryDate,
   parseInStock,
   parseMrpPaise,
   parsePricePaise,
   parseStockCap,
   parseTotalPaise,
+  readCartLines,
   skuIdFromHref,
 } from "./selectors";
 
@@ -143,6 +147,59 @@ describe("findResultCard", () => {
     const addBtn = el({ idx: 2, tag: "button", name: "ADD rice" });
     expect(findResultCard([input, addBtn], riceItem)).toBeUndefined();
   });
+
+  const springOnion = {
+    raw: "spring onion",
+    canonicalItemId: "spring-onion",
+    name: "spring onion",
+    qty: 1,
+    unit: "kg" as const,
+  };
+
+  it("prefers a fresh product over a sponsored, processed (dehydrated/flakes) variant", () => {
+    // The real-world failure: "Sponsored Ad - SHROOTS Dehydrated Chopped Spring Onion Flakes" matched
+    // all tokens and was extracted instead of fresh spring onion.
+    const sponsoredFlakes = el({
+      idx: 73,
+      tag: "a",
+      name: "Sponsored Ad - SHROOTS Dehydrated Chopped Spring Onion Flakes ₹225",
+      attrs: { type: null, name: null, href: "/dp/B0F2TBHMBP" },
+    });
+    const fresh = el({
+      idx: 90,
+      tag: "a",
+      name: "Fresho Spring Onion, 250 g ₹29",
+      attrs: { type: null, name: null, href: "/dp/B0FRESH" },
+    });
+    expect(findResultCard([sponsoredFlakes, fresh], springOnion)?.idx).toBe(90);
+  });
+
+  it("defers (returns undefined) when the only match is a sponsored processed variant", () => {
+    const sponsoredFlakes = el({
+      idx: 73,
+      tag: "a",
+      name: "Sponsored Ad - SHROOTS Dehydrated Chopped Spring Onion Flakes ₹225",
+      attrs: { type: null, name: null, href: "/dp/B0F2TBHMBP" },
+    });
+    expect(findResultCard([sponsoredFlakes], springOnion)).toBeUndefined();
+  });
+
+  it("does NOT penalise a processed term the user actually asked for", () => {
+    const seedsItem = {
+      raw: "tomato seeds",
+      canonicalItemId: "tomato-seeds",
+      name: "tomato seeds",
+      qty: 1,
+      unit: "piece" as const,
+    };
+    const seeds = el({
+      idx: 5,
+      tag: "a",
+      name: "Premium Tomato Seeds Pack ₹99",
+      attrs: { type: null, name: null, href: "/dp/B0SEED" },
+    });
+    expect(findResultCard([seeds], seedsItem)?.idx).toBe(5);
+  });
 });
 
 describe("stock & delivery parsing", () => {
@@ -181,6 +238,137 @@ describe("title & sku derivation", () => {
     expect(skuIdFromHref("/hp/p/HP-ONION-10KG", "x")).toBe("HP-ONION-10KG");
     expect(skuIdFromHref("/dp/B0ONION10?ref=abc", "x")).toBe("B0ONION10");
     expect(skuIdFromHref(null, "Fresh Onion 10kg")).toBe("fresh-onion-10kg");
+  });
+
+  it("extracts the ASIN from a buried href so the same product reads identically everywhere", () => {
+    // Search card, product page and cart row carry DIFFERENT trailing ref=… tokens for the same ASIN.
+    const fromCard = skuIdFromHref("/Amul-Fresh-Paneer-200g/dp/B078KT9RB1/ref=mp_s_a_1_1?dib=x", "t");
+    const fromCart = skuIdFromHref("/dp/B078KT9RB1/ref=ox_sc_act_title_16", "t");
+    expect(fromCard).toBe("B078KT9RB1");
+    expect(fromCart).toBe("B078KT9RB1");
+    expect(fromCard).toBe(fromCart);
+  });
+});
+
+describe("findQuantitySelector", () => {
+  it("finds a native quantity <select>", () => {
+    const sel = el({ idx: 5, tag: "select", value: "1", attrs: { type: null, name: "quantity", href: null } });
+    const other = el({ idx: 6, tag: "select", attrs: { type: null, name: "sort", href: null } });
+    expect(findQuantitySelector([other, sel])?.idx).toBe(5);
+    expect(findQuantitySelector([other])).toBeUndefined();
+  });
+});
+
+describe("findCartRemoveControl", () => {
+  it("finds a Delete/Remove control on a cart row", () => {
+    const del = el({ idx: 3, tag: "input", name: "Delete", attrs: { type: "submit", name: "submit.delete", href: null } });
+    const keep = el({ idx: 4, tag: "button", name: "Save for later", attrs: { type: "button", name: null, href: null } });
+    expect(findCartRemoveControl([keep, del])?.idx).toBe(3);
+    expect(findCartRemoveControl([keep])).toBeUndefined();
+  });
+});
+
+describe("isProductHref", () => {
+  it("accepts product detail links and rejects search/filter/auth chrome", () => {
+    expect(isProductHref("/dp/B0PANEER1")).toBe(true);
+    expect(isProductHref("/gp/product/B0OIL5L")).toBe(true);
+    expect(isProductHref("/in/malai-paneer/HP-PANEER-1KG")).toBe(true);
+    expect(isProductHref("/hp/p/HP-ONION-10KG")).toBe(true);
+    expect(isProductHref(null)).toBe(false);
+    expect(isProductHref("/s?k=paneer&rh=p_36%3A-20000")).toBe(false);
+    expect(isProductHref("/ap/signin")).toBe(false);
+  });
+});
+
+describe("readCartLines", () => {
+  it("reads product rows (sku, title, qty, unit price) from a serialized cart page", () => {
+    const rowA = el({
+      idx: 10,
+      tag: "a",
+      name: "Amul Malai Paneer 1 kg",
+      bbox: [40, 200, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0PANEER1" },
+    });
+    const priceA = el({ idx: 11, tag: "span", name: "₹399", bbox: [40, 230, 80, 24] });
+    const qtyA = el({ idx: 12, tag: "span", name: "Qty: 5", bbox: [40, 230, 60, 24] });
+    const rowB = el({
+      idx: 20,
+      tag: "a",
+      name: "Fortune Refined Oil 5 L ₹1,199",
+      bbox: [40, 320, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0OIL5L" },
+    });
+
+    const lines = readCartLines([rowA, priceA, qtyA, rowB]);
+    expect(lines).toHaveLength(2);
+    const paneer = lines.find((l) => l.skuId === "B0PANEER1")!;
+    expect(paneer).toMatchObject({ title: "Amul Malai Paneer 1 kg", qty: 5, unitPricePaise: 39900 });
+    const oil = lines.find((l) => l.skuId === "B0OIL5L")!;
+    expect(oil).toMatchObject({ qty: 1, unitPricePaise: 119900 });
+  });
+
+  it("ignores chrome (search/filter links, unpriced links) and de-dupes a SKU", () => {
+    const filter = el({
+      idx: 1,
+      tag: "a",
+      name: "Apply the filter Up to ₹200",
+      bbox: [0, 0, 100, 20],
+      attrs: { type: null, name: null, href: "/s?k=paneer&rh=p_36%3A-20000" },
+    });
+    const rowA = el({
+      idx: 10,
+      tag: "a",
+      name: "Amul Malai Paneer 1 kg ₹399",
+      bbox: [40, 200, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0PANEER1" },
+    });
+    const rowDup = el({
+      idx: 11,
+      tag: "a",
+      name: "Amul Malai Paneer 1 kg ₹399",
+      bbox: [40, 200, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0PANEER1" },
+    });
+    const unpriced = el({
+      idx: 12,
+      tag: "a",
+      name: "See more like this",
+      bbox: [40, 600, 100, 20],
+      attrs: { type: null, name: null, href: "/dp/B0OTHER" },
+    });
+
+    const lines = readCartLines([filter, rowA, rowDup, unpriced]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].skuId).toBe("B0PANEER1");
+  });
+
+  it("reads ONLY active-cart rows, not the recommendation carousel below it", () => {
+    // The genuine cart line is stamped with an active-cart ref; the "buy it again" tiles are not.
+    const active = el({
+      idx: 10,
+      tag: "a",
+      name: "Amul Malai Paneer 1 kg ₹399",
+      bbox: [40, 200, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0PANEER001/ref=ox_sc_act_title_1" },
+    });
+    const recoA = el({
+      idx: 20,
+      tag: "a",
+      name: "Dragon Masters Book ₹211",
+      bbox: [40, 700, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0BOOK00001/ref=cbc_bmsm_dp_1" },
+    });
+    const recoB = el({
+      idx: 21,
+      tag: "a",
+      name: "World Map Poster ₹348",
+      bbox: [40, 760, 300, 30],
+      attrs: { type: null, name: null, href: "/dp/B0MAP000001/ref=cbc_bmsm_dp_2" },
+    });
+
+    const lines = readCartLines([active, recoA, recoB]);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].skuId).toBe("B0PANEER001");
   });
 });
 

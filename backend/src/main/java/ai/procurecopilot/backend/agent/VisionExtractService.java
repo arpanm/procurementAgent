@@ -28,9 +28,17 @@ public class VisionExtractService {
             results or product page. Reply with EXACTLY ONE JSON object, no prose:
             {"found":true|false,"title":string,"pricePaise":integer,"mrpPaise":integer|null,
             "inStock":true|false}. pricePaise is the pack/selling price in PAISE (multiply rupees by
-            100; e.g. ₹658 -> 65800). Choose the product tile that best matches the requested item by
-            name/brand/variant/pack size. Prefer the prominent selling price, not the per-kg unit
-            price. If no matching product with a readable price is visible, reply {"found":false}.""";
+            100; e.g. ₹658 -> 65800). Choose the product tile that best matches the requested item,
+            ranking by name first, then brand, then variant. Treat close synonyms and category
+            equivalents as a match (e.g. "chicken legs" == "chicken drumsticks"/"drumsticks";
+            "capsicum" == "bell pepper").
+            Pack size is a PREFERENCE, not a hard filter: if the exact requested pack size is not shown,
+            STILL return the same product/brand in the closest available size (e.g. requested "500 g"
+            but only "1 Kg" of that brand is visible -> return the 1 Kg pack). Likewise if the brand is
+            not present, return the closest same-product match from another brand.
+            If the screenshot is a single product-detail page, read THAT product. Prefer the prominent
+            selling price, not the per-kg unit price. Only reply {"found":false} when NO product of the
+            requested kind (and no synonym/equivalent) is visible at all, or none has a readable price.""";
 
     private static final Logger log = LoggerFactory.getLogger(VisionExtractService.class);
 

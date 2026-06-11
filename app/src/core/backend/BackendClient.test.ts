@@ -100,6 +100,29 @@ describe("HttpBackendClient base-URL resolution", () => {
     expect(urls[urls.length - 1]).toBe("http://localhost:8080/intent");
   });
 
+  it("aborts a request that stalls past the timeout (so a hung fetch can't freeze the caller)", async () => {
+    vi.useFakeTimers();
+    try {
+      // A fetch that never resolves on its own and only rejects when its AbortSignal fires — exactly how
+      // a hung network request behaves. Without the timeout this would hang the checkout driver forever.
+      const fetchImpl: FetchLike = (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("Aborted", "AbortError")),
+          );
+        });
+      const probe: ProbeLike = async () => true;
+      const client = new HttpBackendClient("http://localhost:8080", fetchImpl, probe, 45_000);
+
+      const pending = client.intent({ text: "x" });
+      const assertion = expect(pending).rejects.toThrow(/timed out after 45000ms/);
+      await vi.advanceTimersByTimeAsync(45_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("falls back to the first candidate if none answer the probe", async () => {
     const urls: string[] = [];
     const probe: ProbeLike = async () => false;

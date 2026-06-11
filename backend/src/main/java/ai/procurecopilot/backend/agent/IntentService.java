@@ -276,6 +276,15 @@ public class IntentService {
             if (measureValue != null && measureUnit != null) {
                 packSize = measureValue + " " + measureUnit; // e.g. "1 kg"
             }
+        } else if (measureValue != null && brand != null) {
+            // A BRANDED packaged good given only a weight/volume ("Milky Mist paneer 500 g") — the
+            // measure is the PACK SIZE, not a 500-unit order. Default the pack count to one. (Loose
+            // produce like "2 kg potato" has no brand and stays a real qty below.)
+            qty = 1;
+            qtyResolved = false;
+            unit = PACKAGED_UNIT;
+            unitResolved = false;
+            packSize = measureValue + " " + measureUnit;
         } else if (measureValue != null) {
             qty = measureValue;
             qtyResolved = true;
@@ -323,7 +332,12 @@ public class IntentService {
                     + "qty/unit are the pack COUNT (e.g. 5 \"packet\"). brand is the manufacturer "
                     + "(e.g. \"India Gate\", \"Tata\"), variant is the grade/descriptor (e.g. "
                     + "\"basmati\", \"lite\"), packSize is the per-pack measure as a label like "
-                    + "\"1 kg\" or \"500 g\". Use null for brand/variant/packSize when absent.";
+                    + "\"1 kg\" or \"500 g\". Use null for brand/variant/packSize when absent. "
+                    + "CRITICAL: a bare weight/volume with NO count word (e.g. \"500 g\", \"1 kg\", "
+                    + "\"250 ml\") is the packSize, NOT the qty — set packSize to it and qty to 1. "
+                    + "NEVER put a gram/kg/ml/litre number in qty; qty is ONLY an explicit pack count "
+                    + "such as \"5 packets\" or \"2 dozen\". Loose produce sold by weight (e.g. "
+                    + "\"2 kg potato\", with no brand) keeps qty=2, unit=\"kg\".";
             String user = "locale=" + (locale == null ? "unknown" : locale) + "\norder=" + text;
             String raw = claude.complete(new ClaudeRequest("intent", system, user, 512));
             return parseIntentJson(raw);
@@ -564,6 +578,8 @@ public class IntentService {
     // ---------------------------------------------------------------------------------------------
 
     private static final String DEFAULT_UNIT = "piece";
+    /** Unit assumed for a branded packaged good whose order gives only a pack size (no count). */
+    private static final String PACKAGED_UNIT = "packet";
 
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
     private static final Pattern INTEGER = Pattern.compile("\\d+");

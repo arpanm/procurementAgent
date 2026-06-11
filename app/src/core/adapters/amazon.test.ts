@@ -54,6 +54,8 @@ describe("Amazon adapter", () => {
     expect(onionQuote.pricePaise).toBe(26000);
     expect(onionQuote.inStock).toBe(true);
     expect(onionQuote.deliveryDate).toBe("Tomorrow");
+    // The detail-page URL is captured (absolutised) so checkout can re-open the exact product.
+    expect(onionQuote.productUrl?.endsWith("/dp/B0ONION10")).toBe(true);
 
     const paneerQuote = await engine.readProduct(paneer);
     expect(paneerQuote.skuId).toBe("B0PANEER1");

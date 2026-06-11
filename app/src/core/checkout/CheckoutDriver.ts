@@ -30,6 +30,7 @@ import type {
   OrderAttempt,
   PlatformAllocation,
   PlatformId,
+  RequestedItem,
 } from "../domain/types";
 import type { AuditLog } from "../audit/AuditLog";
 import { InMemorySecureStore } from "../secure/SecureStore";
@@ -44,6 +45,21 @@ export interface CheckoutDriverDeps {
   readonly engine: AutomationEngine;
   readonly backend: BackendClient;
   readonly audit: AuditLog;
+  /**
+   * The originally-requested items, keyed for re-search when filling the cart. Phase 1 only READ
+   * prices (nothing is added pre-approval), so before verifying we must add each approved line to the
+   * cart; re-searching by the original item (brand/variant/pack) re-locates the same product. When an
+   * item isn't supplied for a line, we still attempt {@code addToCart} on whatever page is open.
+   */
+  readonly items?: readonly RequestedItem[];
+  /**
+   * Product detail-page URLs captured while pricing, keyed by `canonicalItemId`. When present for a
+   * line, checkout re-opens the exact product page and adds it from there (far more reliable than
+   * re-searching), per the approved "open the product link directly and add to cart" flow.
+   */
+  readonly productUrls?: ReadonlyMap<string, string>;
+  /** Keep the webview visible during cart-fill (debug). Defaults to hidden automation. */
+  readonly showWebView?: boolean;
   /** Sink for domain events; wire `orchestrator.ingest` to fold them into the session. */
   readonly onEvent?: DomainEventListener;
   /** Override the verifier (e.g. with a price tolerance); defaults to one wrapping `backend`. */
@@ -62,6 +78,9 @@ export interface CheckoutDriverDeps {
 export class CheckoutDriver {
   private readonly engine: AutomationEngine;
   private readonly audit: AuditLog;
+  private readonly itemsById: ReadonlyMap<string, RequestedItem>;
+  private readonly productUrls: ReadonlyMap<string, string>;
+  private readonly showWebView: boolean;
   private readonly onEvent?: DomainEventListener;
   private readonly verifier: VerifierClient;
   private readonly idempotency: IdempotencyStore;
@@ -71,6 +90,11 @@ export class CheckoutDriver {
   constructor(deps: CheckoutDriverDeps) {
     this.engine = deps.engine;
     this.audit = deps.audit;
+    this.itemsById = new Map(
+      (deps.items ?? []).map((item) => [canonicalIdOf(item), item] as const),
+    );
+    this.productUrls = deps.productUrls ?? new Map();
+    this.showWebView = deps.showWebView ?? false;
     this.onEvent = deps.onEvent;
     this.verifier = deps.verifier ?? new VerifierClient(deps.backend);
     this.idempotency =
@@ -97,6 +121,66 @@ export class CheckoutDriver {
     });
 
     try {
+      // 0a. Empty any pre-existing cart items so verification compares the approved lines against a
+      // clean cart (and we don't accidentally check out someone's leftover items). Best-effort: a
+      // platform engine without cart-clearing support (or a stubbed test engine) simply skips this.
+      if (this.engine.clearCart) {
+        try {
+          await this.engine.clearCart();
+          await this.audit.append({
+            actor: "agent",
+            action: "cart:clear",
+            after: { platform },
+            at: this.now(),
+          });
+        } catch (clearErr) {
+          await this.audit.append({
+            actor: "agent",
+            action: "cart:clear-failed",
+            after: {
+              platform,
+              reason: clearErr instanceof Error ? clearErr.message : String(clearErr),
+            },
+            at: this.now(),
+          });
+        }
+      }
+
+      // 0b. Fill the cart with the approved lines. Phase 1 only READ prices (we never add to a cart
+      // before the human approves), so the cart is empty here. We re-open the exact product detail page
+      // captured while pricing and add it from there; if no URL is known, fall back to re-searching the
+      // original item. Per-line failures are non-fatal — the Verifier below is the gate and will surface
+      // anything missing rather than letting us check out a wrong cart.
+      for (const line of allocation.lines) {
+        try {
+          const productUrl = this.productUrls.get(line.canonicalItemId);
+          if (productUrl) {
+            await this.engine.open(productUrl, { hidden: !this.showWebView });
+          } else {
+            const item = this.itemsById.get(line.canonicalItemId);
+            if (item) await this.engine.search(item);
+          }
+          await this.engine.addToCart(line.skuId, line.qty);
+          await this.audit.append({
+            actor: "agent",
+            action: "cart:add",
+            after: { platform, skuId: line.skuId, qty: line.qty, via: productUrl ? "product-url" : "search" },
+            at: this.now(),
+          });
+        } catch (addErr) {
+          await this.audit.append({
+            actor: "agent",
+            action: "cart:add-failed",
+            after: {
+              platform,
+              skuId: line.skuId,
+              reason: addErr instanceof Error ? addErr.message : String(addErr),
+            },
+            at: this.now(),
+          });
+        }
+      }
+
       // 1. Read the cart.
       const cart = await this.engine.getCart();
       await this.audit.append({
@@ -259,4 +343,14 @@ export class CheckoutDriver {
       updatedAt: this.now(),
     };
   }
+}
+
+/**
+ * The on-device {@link RequestedItem} carries a `canonicalItemId` at runtime (the backend `/intent`
+ * and `/plan` responses include it) even though the TS type omits it; the optimizer keys allocation
+ * lines by it, so we map items by the same id to re-find a line's product. Falls back to the name.
+ */
+function canonicalIdOf(item: RequestedItem): string {
+  const maybe = (item as { canonicalItemId?: unknown }).canonicalItemId;
+  return typeof maybe === "string" && maybe.length > 0 ? maybe : item.name;
 }

@@ -10,6 +10,7 @@
  */
 import type { BackendClient } from "../backend/BackendClient";
 import type { InAppBrowserBridge } from "../automation/bridge";
+import type { CartSnapshot, Observation } from "../automation/AutomationEngine";
 import type { PlatformId } from "../domain/types";
 import {
   WebViewAutomationEngine,
@@ -18,6 +19,7 @@ import {
 } from "../automation/WebViewAutomationEngine";
 import { AMAZON_PLAYBOOK_VERSION, amazonPlaybooks } from "./playbooks/amazon";
 import { HYPERPURE_PLAYBOOK_VERSION, hyperpurePlaybooks } from "./playbooks/hyperpure";
+import { readCartLines } from "./selectors";
 
 /** Health indicator surfaced to the UI for the per-platform banner. */
 export interface PlatformHealth {
@@ -36,12 +38,29 @@ export type CreateEngineOptions = Omit<
 interface PlatformConfig {
   readonly playbooks: Playbooks;
   readonly playbookVersion: string;
+  /** Cart-page URL `getCart` navigates to before reading the cart for verification. */
+  readonly cartUrl: string;
 }
 
 const PLATFORM_CONFIG: Readonly<Record<PlatformId, PlatformConfig>> = {
-  hyperpure: { playbooks: hyperpurePlaybooks, playbookVersion: HYPERPURE_PLAYBOOK_VERSION },
-  amazon: { playbooks: amazonPlaybooks, playbookVersion: AMAZON_PLAYBOOK_VERSION },
+  hyperpure: {
+    playbooks: hyperpurePlaybooks,
+    playbookVersion: HYPERPURE_PLAYBOOK_VERSION,
+    cartUrl: "https://www.hyperpure.com/in/cart",
+  },
+  amazon: {
+    playbooks: amazonPlaybooks,
+    playbookVersion: AMAZON_PLAYBOOK_VERSION,
+    cartUrl: "https://www.amazon.in/gp/cart/view.html",
+  },
 };
+
+/** Heuristic cart reader shared by all platforms: parse product rows off the serialized cart page. */
+function platformCartReader(obs: Observation, platform: PlatformId): CartSnapshot {
+  const lines = readCartLines(obs.elements);
+  const subtotalPaise = lines.reduce((sum, l) => sum + l.unitPricePaise * l.qty, 0);
+  return { platform, lines, subtotalPaise };
+}
 
 const healthStore = new Map<PlatformId, PlatformHealth>();
 
@@ -100,6 +119,10 @@ export function createEngine(
 ): WebViewAutomationEngine {
   const playbooks = opts.playbooks ?? PLATFORM_CONFIG[platform].playbooks;
   const engine = new WebViewAutomationEngine({
+    // A real cart reader + cart-page URL so the Verifier reads the actual cart (the engine default is an
+    // empty cart, which would make verification fail no matter what add-to-cart did). Overridable.
+    cartReader: platformCartReader,
+    cartUrl: PLATFORM_CONFIG[platform].cartUrl,
     ...opts,
     platform,
     bridge,

@@ -11,7 +11,7 @@
  * Parsing is intentionally forgiving: Hyperpure and Amazon render prices, stock and delivery in many
  * shapes (`₹250`, `₹2,499.00`, `Rs. 85`, "In stock"/"Out of stock", "Delivery by …"/"Get it by …").
  */
-import type { SerializedElement } from "../automation/AutomationEngine";
+import type { CartLine, SerializedElement } from "../automation/AutomationEngine";
 import type { RequestedItem } from "../domain/types";
 
 export type Elements = readonly SerializedElement[];
@@ -114,6 +114,18 @@ export function isNonProductChrome(el: SerializedElement): boolean {
   return false;
 }
 
+/** Ad tiles Amazon injects into results — almost never the right buy and often an unrelated variant. */
+const SPONSORED_RE = /\bsponsored\b/i;
+/**
+ * Processed / non-fresh / non-grocery variants a keyword search drags in (search "spring onion" →
+ * "Dehydrated Chopped Spring Onion Flakes"; "tomato" → "tomato seeds"/"ketchup"). When the requested
+ * name doesn't itself ask for these, they're the wrong product, so we penalise rather than hard-reject
+ * (still selectable if nothing cleaner exists, but it sinks below a genuine fresh match — and if it's
+ * the only candidate the score drops enough that we defer to the Claude/vision read instead).
+ */
+const PROCESSED_VARIANT_RE =
+  /\b(dehydrated|dried|freeze[\s-]?dried|flakes?|powder|paste|pickle|sauce|ketchup|seeds?|sapling|plant|combo|kit)\b/gi;
+
 function scoreCard(el: SerializedElement, item: RequestedItem): number {
   if (isNonProductChrome(el)) return 0;
   const text = cardText(el);
@@ -137,6 +149,14 @@ function scoreCard(el: SerializedElement, item: RequestedItem): number {
   if (item.packSize) {
     const packCompact = lower(item.packSize).replace(/\s+/g, "");
     if (text.replace(/\s+/g, "").includes(packCompact)) score += 1;
+  }
+  // Relevance penalties: sponsored ad tiles and processed/non-fresh variants the user didn't ask for.
+  // Each distinct processed term ("dehydrated", "flakes", …) stacks, so a doubly-processed sponsored
+  // ad sinks below zero (deferring to the Claude/vision read) while a single off-term only demotes it.
+  if (SPONSORED_RE.test(text)) score -= 5;
+  const requested = lower(`${item.name} ${item.variant ?? ""} ${item.packSize ?? ""}`);
+  for (const m of text.matchAll(PROCESSED_VARIANT_RE)) {
+    if (!requested.includes(lower(m[0]))) score -= 4;
   }
   return score;
 }
@@ -235,6 +255,30 @@ export function findCheckoutButton(elements: Elements): SerializedElement | unde
   );
 }
 
+const QTY_SELECT = /quantity|qty/i;
+
+/**
+ * The product-page quantity selector (a native `<select>` such as Amazon's `name="quantity"`). Used to
+ * set the requested count in ONE step before adding to cart, instead of clicking "+" N times (which a
+ * product page can't do, and whose progress we can't measure when the cart badge is hidden).
+ */
+export function findQuantitySelector(elements: Elements): SerializedElement | undefined {
+  return elements.find(
+    (el) => el.tag === "select" && (QTY_SELECT.test(el.attrs.name ?? "") || QTY_SELECT.test(el.name)),
+  );
+}
+
+const CART_REMOVE = /^\s*(?:delete|remove)\s*$/i;
+
+/** A cart-row "Delete"/"Remove" control, used to empty an existing cart before adding our items. */
+export function findCartRemoveControl(elements: Elements): SerializedElement | undefined {
+  return elements.find(
+    (el) =>
+      (isButton(el) || isLink(el)) &&
+      (CART_REMOVE.test(el.name) || /submit\.delete|deletecartitem|remove/i.test(el.attrs.name ?? "")),
+  );
+}
+
 // --- robust text parsers -----------------------------------------------------
 
 const CURRENCY = /(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/gi;
@@ -301,11 +345,21 @@ export function parseMovPaise(text: string): number | undefined {
   return Number.isFinite(paise) ? paise : undefined;
 }
 
+/** Amazon's stable product id (ASIN) lives right after `/dp/`, `/gp/product/`, etc. */
+const ASIN_RE = /\/(?:dp|gp\/product|gp\/aw\/d|gp\/offer-listing)\/([A-Z0-9]{10})(?:[/?]|$)/i;
+
 /** Derive a stable SKU id from a product href; falls back to a slug of the title. */
 export function skuIdFromHref(href: string | null | undefined, fallbackTitle: string): string {
   if (href) {
+    // Prefer the ASIN: the trailing path segment on Amazon is a per-placement "ref=…" tracking token
+    // that differs between the search card and the cart row, which would break SKU-level verification.
+    // The ASIN is identical everywhere the product appears, so the cart read matches the approved plan.
+    const asin = ASIN_RE.exec(href);
+    if (asin) return asin[1].toUpperCase();
     const path = href.split(/[?#]/)[0];
-    const segments = path.split("/").filter((s) => s.length > 0);
+    const segments = path
+      .split("/")
+      .filter((s) => s.length > 0 && !/^ref=/i.test(s));
     const last = segments[segments.length - 1];
     if (last) return last;
   }
@@ -314,6 +368,84 @@ export function skuIdFromHref(href: string | null | undefined, fallbackTitle: st
     .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/(^-|-$)/g, "")
     .slice(0, 48) || "unknown-sku";
+}
+
+/** A product detail-page link: Amazon `/dp/…` `/gp/product/…`, Hyperpure `/in/…` `/p/…` `/hp/…`. */
+const PRODUCT_HREF_RE = /\/(dp|gp\/product|gp\/aw\/d)\/|\/(in|hp|p)\//i;
+/** A search/refinement/auth link we must never mistake for a product page. */
+const NON_PRODUCT_HREF_RE = /[?&]rh=|[?&]k=|\/s\?|\/s\/|signin|\/ap\//i;
+
+/** True when an href points at a single product's detail page (not search/filter/auth chrome). */
+export function isProductHref(href: string | null | undefined): boolean {
+  if (!href) return false;
+  return PRODUCT_HREF_RE.test(href) && !NON_PRODUCT_HREF_RE.test(href);
+}
+
+const QTY_RE = /\b(?:qty|quantity)\b[^\d]*(\d{1,3})|\bx\s*(\d{1,3})\b/i;
+
+/** Read an explicit quantity near a cart row (a `Qty: N` label or a small numeric input value). */
+function nearbyQty(elements: Elements, row: SerializedElement): number {
+  const [cx, cy] = [row.bbox[0], row.bbox[1]];
+  for (const el of elements) {
+    const dy = el.bbox[1] - cy;
+    if (Math.abs(el.bbox[0] - cx) > 320 || dy < -80 || dy > 200) continue;
+    const m = QTY_RE.exec(`${el.name} ${el.value ?? ""}`);
+    if (m) {
+      const n = Number.parseInt(m[1] ?? m[2] ?? "", 10);
+      if (Number.isFinite(n) && n > 0 && n < 1000) return n;
+    }
+    if (el.tag === "input" && el.value && /^\d{1,3}$/.test(el.value.trim())) {
+      const n = Number.parseInt(el.value.trim(), 10);
+      if (n > 0 && n < 1000) return n;
+    }
+  }
+  return 1;
+}
+
+/**
+ * Heuristically read cart lines from a serialized cart page. A cart row is a product-detail link with
+ * a price (inline or in the same row) and an optional quantity nearby. Order-independent and pure, so
+ * the Verifier can compare it to the approved plan. De-dupes by SKU (a row may serialize twice).
+ */
+/**
+ * Markers on a product link that identify it as a line in the ACTIVE cart (not a "Buy it again" /
+ * "Customers also bought" recommendation carousel that cart pages also render). Amazon stamps active
+ * rows with `ref=ox_sc_act…`; other sites use a `/cart/`-scoped or `sc-list-item` link.
+ */
+const ACTIVE_CART_MARKER = /ref=ox_sc_act|sc[-_]?(?:list|item)|active[-_]?cart|\/cart\//i;
+
+export function readCartLines(elements: Elements): CartLine[] {
+  // First collect every product-detail link with a readable price (inline or in the same row).
+  const candidates: { el: SerializedElement; unit: number }[] = [];
+  for (const el of elements) {
+    if (!isLink(el) || !isProductHref(el.attrs.href)) continue;
+    const inline = parsePricePaise(el.name);
+    const priceEl = inline != null ? el : findNearbyPriceEl(elements, el);
+    const unit = priceEl ? parsePricePaise(priceEl.name) : null;
+    if (unit == null) continue;
+    if (!cleanTitle(el.name)) continue;
+    candidates.push({ el, unit });
+  }
+
+  // If the page exposes active-cart markers, keep ONLY those rows — otherwise the recommendation
+  // carousels below the cart (also priced product links) would be read as phantom cart lines with
+  // bogus quantities, making the Verifier compare against the wrong thing.
+  const active = candidates.filter(({ el }) => ACTIVE_CART_MARKER.test(haystack(el)));
+  const chosen = active.length > 0 ? active : candidates;
+
+  const byId = new Map<string, CartLine>();
+  for (const { el, unit } of chosen) {
+    const title = cleanTitle(el.name);
+    const skuId = skuIdFromHref(el.attrs.href, title);
+    if (byId.has(skuId)) continue;
+    byId.set(skuId, {
+      skuId,
+      title,
+      qty: nearbyQty(elements, el),
+      unitPricePaise: unit,
+    });
+  }
+  return [...byId.values()];
 }
 
 /** Strip price/stock/delivery noise to recover a clean product title. */

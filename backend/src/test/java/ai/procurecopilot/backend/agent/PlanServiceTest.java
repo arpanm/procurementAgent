@@ -32,6 +32,34 @@ class PlanServiceTest {
     }
 
     @Test
+    void preservesBrandVariantAndPackSizeThroughNormalization() {
+        PlanResponse r = planService.plan(new PlanRequest("order", List.of(
+                new Domain.RequestedItem("paneer", "paneer", 5, "packet",
+                        "Milky Mist", null, "500 g"))));
+
+        Domain.RequestedItem paneer = r.normalizedItems().get(0);
+        assertThat(paneer.brand()).isEqualTo("Milky Mist");
+        assertThat(paneer.packSize()).isEqualTo("500 g");
+        assertThat(paneer.qty()).isEqualTo(5);
+        assertThat(paneer.unit()).isEqualTo("packet");
+    }
+
+    @Test
+    void keepsFirstSeenRefinementsWhenMergingQuantities() {
+        PlanResponse r = planService.plan(new PlanRequest("order", List.of(
+                new Domain.RequestedItem("paneer", "paneer", 2, "packet",
+                        "Milky Mist", null, "500 g"),
+                new Domain.RequestedItem("paneer", "paneer", 3, "packet",
+                        "Amul", null, "200 g"))));
+
+        assertThat(r.normalizedItems()).hasSize(1);
+        Domain.RequestedItem paneer = r.normalizedItems().get(0);
+        assertThat(paneer.qty()).isEqualTo(5);
+        assertThat(paneer.brand()).isEqualTo("Milky Mist");
+        assertThat(paneer.packSize()).isEqualTo("500 g");
+    }
+
+    @Test
     void differentUnitsAreNotMerged() {
         PlanResponse r = planService.plan(new PlanRequest("order", List.of(
                 new Domain.RequestedItem("potato", "potato", 2, "kg"),

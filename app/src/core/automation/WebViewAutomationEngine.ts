@@ -58,7 +58,9 @@ export interface Playbook {
 export type PlaybookName =
   | "search"
   | "readProduct"
+  | "setQuantity"
   | "addToCart"
+  | "clearCart"
   | "checkout"
   | "placeOrder";
 
@@ -72,6 +74,8 @@ export interface QuoteDraft {
   readonly pricePaise: number;
   readonly mrpPaise?: number;
   readonly inStock: boolean;
+  /** Product detail-page URL (relative or absolute) the engine absolutises onto the Quote. */
+  readonly productUrl?: string;
   readonly stockCap?: number;
   readonly deliveryDate?: string;
   readonly movPaise?: number;
@@ -110,11 +114,24 @@ export interface WebViewAutomationEngineOptions {
    */
   readonly listingSettleMs?: number;
   /**
+   * Max time (ms) to keep re-perceiving a freshly-opened cart page before `clearCart`/`getCart` read it.
+   * Amazon streams the cart body AFTER its settle/network-idle fires, so the first perceive can catch a
+   * near-empty shell (~1 element / 146-byte DOM) — which silently fooled `clearCart` into reporting "cart
+   * emptied" while the old items were still there, and made the Verifier read an empty cart. Default 0
+   * (off) so unit tests stay synchronous; production sets a few seconds. Uses a real timer.
+   */
+  readonly cartLoadMs?: number;
+  /**
    * When DOM extraction yields no quote in `readProduct`, capture a webview screenshot and ask the
    * backend's vision model to read the product. Off by default; enabled for platforms whose listing
    * DOM is too large to serialize reliably (Hyperpure). Requires `backend.visionExtract`.
    */
   readonly visionFallback?: boolean;
+  /**
+   * The platform's cart-page URL. `getCart` navigates here before reading, since after add-to-cart the
+   * webview is parked on the last product page. When unset, `getCart` reads whatever page is open.
+   */
+  readonly cartUrl?: string;
   /** Base backoff in ms; the nth retry waits base * 2^n. Default 200. */
   readonly baseBackoffMs?: number;
   /** Clock for `readAt`/timestamps. */
@@ -177,6 +194,8 @@ const OTP_DOM_PATTERN = /\botp\b|one[-\s]?time[-\s]?(?:pass(?:word|code)|code|pi
 const PAYMENT_DOM_PATTERN =
   /\bpayment\b|pay now|proceed to pay|\bupi\b|card number|net\s?banking/i;
 const CART_BADGE_PATTERN = /cart/i;
+/** A product detail-page URL (vs. a search/listing/home page) on Amazon or Hyperpure. */
+const PRODUCT_DETAIL_URL_RE = /\/(dp|gp\/product|gp\/aw\/d)\/|hyperpure\.com\/in\/[^/]+\/[^/?]+/i;
 
 export class WebViewAutomationEngine implements AutomationEngine {
   readonly platform: PlatformId;
@@ -191,7 +210,9 @@ export class WebViewAutomationEngine implements AutomationEngine {
   private readonly maxActionRetries: number;
   private readonly maxLoopSteps: number;
   private readonly listingSettleMs: number;
+  private readonly cartLoadMs: number;
   private readonly visionFallback: boolean;
+  private readonly cartUrl?: string;
   private readonly baseBackoffMs: number;
   private readonly now: () => string;
   private readonly otpUrlPatterns: readonly RegExp[];
@@ -202,6 +223,8 @@ export class WebViewAutomationEngine implements AutomationEngine {
   private readonly listeners = new Set<DomainEventListener>();
   private hidden = true;
   private urlUnsubscribe?: () => void;
+  /** Last observed page URL; used to absolutise product/cart hrefs read off the DOM. */
+  private lastUrl = "";
 
   constructor(opts: WebViewAutomationEngineOptions) {
     this.platform = opts.platform;
@@ -215,7 +238,9 @@ export class WebViewAutomationEngine implements AutomationEngine {
     this.maxActionRetries = opts.maxActionRetries ?? 2;
     this.maxLoopSteps = opts.maxLoopSteps ?? 60;
     this.listingSettleMs = opts.listingSettleMs ?? 0;
+    this.cartLoadMs = opts.cartLoadMs ?? 0;
     this.visionFallback = opts.visionFallback ?? false;
+    this.cartUrl = opts.cartUrl;
     this.baseBackoffMs = opts.baseBackoffMs ?? 200;
     this.now = opts.now ?? (() => new Date().toISOString());
     this.otpUrlPatterns = opts.otpUrlPatterns ?? DEFAULT_OTP_URL_PATTERNS;
@@ -287,32 +312,157 @@ export class WebViewAutomationEngine implements AutomationEngine {
   }
 
   async addToCart(skuId: string, qty: number): Promise<void> {
+    // Prefer setting the product-page quantity selector to the full count in one shot (Amazon's
+    // `<select name="quantity">`). One "Add to cart" then adds all N at once — reliable even when the
+    // cart badge is hidden. Platforms with only a +/- stepper have no selector, so this is a no-op and
+    // the badge-watching loop below adds one at a time instead.
+    if (qty > 1 && this.playbooks.setQuantity) {
+      const r = await this.runLoop({
+        stepName: "setQuantity",
+        task: `set the quantity to ${qty}`,
+        playbook: this.playbooks.setQuantity,
+        state: { skuId, qty },
+      });
+      if (r.kind === "hitl") return;
+    }
+
     const before = await this.perceive();
     const beforeCount = this.cartCountReader(before);
+    // Best-effort reach the requested quantity by adding one at a time and watching the cart badge:
+    // on tiles with a +/- stepper each click increments; on a product page the first click adds it.
+    // We can only *measure* progress when the badge is readable — otherwise we add once and trust the
+    // Verifier (which re-reads the real cart) to catch any shortfall, never inventing a quantity.
+    const target = beforeCount != null ? beforeCount + qty : null;
+    const maxRounds = Math.max(1, Math.min(qty, 12)) + 2;
+    let count = beforeCount ?? 0;
+    let stalled = 0;
+    for (let round = 0; round < maxRounds; round++) {
+      const result = await this.runLoop({
+        stepName: "addToCart",
+        task: `add "${skuId}" to the cart`,
+        playbook: this.playbooks.addToCart,
+        state: { skuId, qty, remaining: target != null ? target - count : qty },
+      });
+      if (result.kind === "hitl") return;
 
-    const result = await this.runLoop({
-      stepName: "addToCart",
-      task: `add ${qty} of "${skuId}" to the cart`,
-      playbook: this.playbooks.addToCart,
-      state: { skuId, qty },
-    });
-    if (result.kind === "hitl") return;
-
-    const after = await this.perceive();
-    const afterCount = this.cartCountReader(after);
-    const cartCount = afterCount ?? (beforeCount ?? 0) + 1;
+      const after = await this.perceive();
+      const afterCount = this.cartCountReader(after);
+      if (afterCount != null) {
+        if (afterCount <= count) stalled++;
+        else stalled = 0;
+        count = afterCount;
+      }
+      // Stop when we've reached the target, when the badge isn't measurable (single best-effort add),
+      // or when two rounds make no progress (the page can't be advanced further automatically).
+      if (target == null) {
+        count = beforeCount != null ? beforeCount + 1 : count;
+        break;
+      }
+      if (count >= target || stalled >= 2) break;
+    }
+    this.trace(
+      "info",
+      `addToCart "${skuId}" → cart count ${count}` +
+        (target != null ? ` (target ${target})` : " (badge unreadable)"),
+    );
     this.emit({
       type: "ItemAddedToCart",
       platform: this.platform,
       skuId,
       qty,
-      cartCount,
+      cartCount: count,
     });
   }
 
   async getCart(): Promise<CartSnapshot> {
-    const obs = await this.perceive();
-    return this.cartReader(obs, this.platform);
+    // The cart is read on a dedicated cart page; after add-to-cart the webview is parked on the last
+    // product page, so navigate to the cart first (preserving the current shown/hidden state).
+    if (this.cartUrl) {
+      try {
+        await this.open(this.cartUrl, { hidden: this.hidden });
+      } catch (e) {
+        this.trace("warn", `getCart: could not open cart page ${this.cartUrl}: ${String(e)}`);
+      }
+    }
+    // Wait for the cart body to actually stream in — perceiving the bare shell would read an empty cart
+    // and fail verification even when add-to-cart succeeded.
+    const obs = await this.awaitCartLoaded();
+    const cart = this.cartReader(obs, this.platform);
+    this.traceCartDiag(obs, cart);
+    return cart;
+  }
+
+  /**
+   * Real-timer poll until a freshly-opened cart page has actually rendered. Amazon returns the cart URL's
+   * settle/ready while the body is still a ~1-element shell (the 146-byte DOM that fooled `clearCart`),
+   * then streams the real contents a beat later. We re-perceive until the DOM has a meaningful element
+   * count or `cartLoadMs` elapses. Bounded, and a no-op in tests (`cartLoadMs` defaults to 0 → one
+   * perceive, no waiting).
+   */
+  private async awaitCartLoaded(): Promise<Observation> {
+    let obs = await this.perceive();
+    if (this.cartLoadMs <= 0) return obs;
+    const start = Date.now();
+    let polls = 0;
+    while (obs.elements.length < CART_LOADED_MIN_ELEMENTS && Date.now() - start < this.cartLoadMs) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 600));
+      obs = await this.perceive();
+      polls++;
+    }
+    if (polls > 0) {
+      this.trace(
+        "info",
+        `cart-load: ${polls} poll(s) → ${obs.elements.length} elements` +
+          (obs.elements.length < CART_LOADED_MIN_ELEMENTS ? " (still bare — read may be unreliable)" : ""),
+      );
+    }
+    return obs;
+  }
+
+  /**
+   * Empty the cart before we add the approved lines, so verification compares OUR items against a clean
+   * cart instead of whatever was left from a previous session. Navigates to the cart page, then removes
+   * one line per round until the cart reads empty or a round makes no progress (so a stuck "Delete"
+   * control can never spin forever). A HITL boundary (re-login) aborts cleanly.
+   */
+  async clearCart(): Promise<void> {
+    if (!this.playbooks.clearCart) return;
+    if (this.cartUrl) {
+      try {
+        await this.open(this.cartUrl, { hidden: this.hidden });
+      } catch (e) {
+        this.trace("warn", `clearCart: could not open cart page ${this.cartUrl}: ${String(e)}`);
+        return;
+      }
+    }
+    let prev = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 20; round++) {
+      // Wait for the cart body to render: perceiving the bare shell reads 0 lines and would make us
+      // declare the cart "emptied" while the old items are still there (exactly the bug seen in the
+      // field — clearCart logged "emptied" then the cart still held a bag + a book).
+      const obs = await this.awaitCartLoaded();
+      const remaining = this.cartReader(obs, this.platform).lines.length;
+      if (remaining === 0) {
+        // Only trust "empty" once the page has actually loaded; a still-bare shell means we never saw the
+        // real cart, so do not claim success (the Verifier will catch any leftover items).
+        if (obs.elements.length >= CART_LOADED_MIN_ELEMENTS) {
+          this.trace("info", "clearCart → cart emptied");
+        } else {
+          this.trace("warn", "clearCart: cart page did not render — leaving items, will rely on Verifier");
+        }
+        return;
+      }
+      // No fewer lines than last round → the remove control isn't advancing; stop rather than loop.
+      if (remaining >= prev) break;
+      prev = remaining;
+      const result = await this.runLoop({
+        stepName: "clearCart",
+        task: "remove one item from the cart",
+        playbook: this.playbooks.clearCart,
+      });
+      if (result.kind === "hitl") return;
+    }
+    this.trace("info", "clearCart → done");
   }
 
   async checkout(): Promise<CheckoutOutcome> {
@@ -581,7 +731,19 @@ export class WebViewAutomationEngine implements AutomationEngine {
     const detail = await this.bridge.call(this.webviewId, (rid) =>
       buildSerializerScript(rid),
     );
-    return coerceObservation(detail);
+    const obs = coerceObservation(detail);
+    if (obs.url) this.lastUrl = obs.url;
+    return obs;
+  }
+
+  /** Resolve a relative/absolute href against the last observed page URL (best-effort). */
+  private absoluteUrl(href: string | undefined): string | undefined {
+    if (!href) return undefined;
+    try {
+      return new URL(href, this.lastUrl || undefined).toString();
+    } catch {
+      return /^https?:\/\//i.test(href) ? href : undefined;
+    }
   }
 
   private async settle(): Promise<void> {
@@ -724,6 +886,10 @@ export class WebViewAutomationEngine implements AutomationEngine {
         pricePaise: res.pricePaise,
         mrpPaise: res.mrpPaise,
         inStock: res.inStock ?? true,
+        // If the screenshot was taken on a product detail page, remember it so checkout can re-open the
+        // exact product. On a search-listing screenshot there is no single product URL, so leave it
+        // unset and checkout will re-search instead.
+        productUrl: PRODUCT_DETAIL_URL_RE.test(this.lastUrl) ? this.lastUrl : undefined,
       };
     } catch (e) {
       this.trace("warn", `vision-extract failed: ${String(e)}`);
@@ -748,6 +914,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
       pricePaise: draft.pricePaise,
       mrpPaise: draft.mrpPaise,
       inStock: draft.inStock,
+      productUrl: this.absoluteUrl(draft.productUrl),
       stockCap: draft.stockCap,
       deliveryDate: draft.deliveryDate,
       movPaise: draft.movPaise,
@@ -822,6 +989,37 @@ export class WebViewAutomationEngine implements AutomationEngine {
     for (const el of named.slice(0, 4)) this.trace("info", `  named ${sample(el)}`);
     for (const el of priced.slice(0, 4)) this.trace("info", `  priced ${sample(el)}`);
   }
+
+  /**
+   * Device-side evidence for the cart read: logs how many lines the reader recovered and a sample of
+   * product-link rows on the page, so a verify "missing SKU" can be debugged against the REAL cart DOM
+   * (the reader is heuristic; this trace is how we tune its selectors without guessing).
+   */
+  private traceCartDiag(obs: Observation, cart: CartSnapshot): void {
+    if (!isAutomationDebug()) return;
+    this.trace(
+      "info",
+      `cart-diag: url=${obs.url || "(blank)"} · ${obs.elements.length} elements · reader found ${cart.lines.length} line(s)`,
+    );
+    for (const line of cart.lines.slice(0, 6)) {
+      this.trace(
+        "info",
+        `  cart-line ${line.skuId} ×${line.qty} @ ${(line.unitPricePaise / 100).toFixed(2)} "${line.title.slice(0, 60)}"`,
+      );
+    }
+    if (cart.lines.length === 0) {
+      const links = obs.elements
+        .filter((el) => (el.tag === "a" || el.role === "link") && (el.attrs.href ?? "").length > 0)
+        .slice(0, 10);
+      this.trace("warn", `cart-diag: 0 lines parsed — sample links on page (tune readCartLines):`);
+      for (const el of links) {
+        this.trace(
+          "info",
+          `  link [${el.idx}] "${el.name.slice(0, 50)}" href=${(el.attrs.href ?? "").slice(0, 60)}`,
+        );
+      }
+    }
+  }
 }
 
 // --- module-level pure helpers -----------------------------------------------
@@ -850,6 +1048,14 @@ function countPricedElements(obs: Observation): number {
  * same column as a priced element (title/price are sibling nodes). Promo banners fail this (no item).
  */
 const UNIT_PRICE_RE = /(?:₹|rs\.?|inr)[\s\d.,]*\/\s*(?:kg|gm?|pc|pcs|piece|pack|ltr|l|ml)\b/i;
+
+/**
+ * Min serialized-element count for a cart page to be considered "rendered" (vs. a not-yet-streamed shell).
+ * A blank Amazon cart shell serializes to ~1 element (the 146-byte DOM seen in the field); even an EMPTY
+ * but loaded cart carries the site header/footer/nav (dozens of elements), so 40 cleanly separates the
+ * two without waiting on a genuinely-empty cart.
+ */
+const CART_LOADED_MIN_ELEMENTS = 40;
 
 function hasPricedItem(obs: Observation, item?: RequestedItem): boolean {
   // A per-unit price ("₹121/kg") appears only on real product tiles — never on promo banners or price
@@ -908,24 +1114,32 @@ function slugify(s: string): string {
 }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account\/(login|signin))\b/i;
-const LOGIN_WORD_RE = /\b(log\s?in|sign\s?in|continue with (otp|phone|mobile|google|email)|enter (otp|mobile|phone))\b/i;
-const LOGGED_IN_RE = /\b(log\s?out|sign\s?out|my orders|my account|your account|hello[, ]|account &|wishlist)\b/i;
+const SIGNIN_PROMPT_RE = /\b(log\s?in|sign\s?in|continue with (otp|phone|mobile|google|email)|enter (otp|mobile|phone))\b/i;
+const SIGNIN_HREF_RE = /\/(ap\/signin|signin|sign-in|login|account\/(login|signin))\b/i;
+// A genuine "sign out" affordance only renders once authenticated — the strongest logged-in signal.
+const SIGNOUT_RE = /\b(log\s?out|sign\s?out)\b/i;
 
 /**
- * Heuristic login-wall detector: a login page either lives at a login URL, or shows sign-in prompts
- * while showing none of the usual logged-in affordances (logout / my account / orders). Imperfect by
- * nature — the debug trace logs the decision so it can be tuned per platform.
+ * Heuristic login-wall detector. We deliberately do NOT treat "your account" / "hello," / "wishlist"
+ * as proof of being logged in: those render on logged-OUT pages too (e.g. Amazon shows a "your
+ * account" link and a "Hello, sign in" greeting that both deep-link to /ap/signin), which previously
+ * produced a false "authenticated" verdict. Instead:
+ *  - a real "sign out" affordance ⇒ authenticated (not a wall);
+ *  - otherwise any sign-in PROMPT text, or a link/button pointing at a sign-in URL, ⇒ a wall.
+ * The debug trace logs the decision so it can be tuned per platform.
  */
-function looksLikeLoginWall(obs: Observation): boolean {
+export function looksLikeLoginWall(obs: Observation): boolean {
   if (LOGIN_URL_RE.test(obs.url)) return true;
-  let loginHits = 0;
-  let loggedInHits = 0;
+  let signInHits = 0;
+  let signOutHits = 0;
   for (const el of obs.elements) {
     const text = `${el.name} ${el.value ?? ""}`;
-    if (LOGIN_WORD_RE.test(text)) loginHits++;
-    if (LOGGED_IN_RE.test(text)) loggedInHits++;
+    const href = el.attrs.href ?? "";
+    if (SIGNOUT_RE.test(text)) signOutHits++;
+    if (SIGNIN_PROMPT_RE.test(text) || SIGNIN_HREF_RE.test(href)) signInHits++;
   }
-  return loginHits > 0 && loggedInHits === 0;
+  if (signOutHits > 0) return false;
+  return signInHits > 0;
 }
 
 /** One-line, PII-free description of an action for the debug trace. */

@@ -88,6 +88,11 @@ export interface AutomationEngine {
   readProduct(item: RequestedItem): Promise<Quote>;
   /** Add a SKU/qty to the cart. */
   addToCart(skuId: string, qty: number): Promise<void>;
+  /**
+   * Empty the cart of any pre-existing items before adding the approved lines, so verification runs
+   * against a clean cart. Optional: implemented by the WebView engine; mocks may omit it.
+   */
+  clearCart?(): Promise<void>;
   /** Read the current cart for verification. */
   getCart(): Promise<CartSnapshot>;
   /** Begin checkout; resolves to whether OTP/payment is needed or credit is OK. */

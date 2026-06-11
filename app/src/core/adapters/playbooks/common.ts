@@ -25,11 +25,15 @@ import {
   detectReloginNeeded,
   findAddToCart,
   findCartLink,
+  findCartRemoveControl,
   findCheckoutButton,
   findNearbyPriceEl,
+  findQuantitySelector,
   findResultCard,
   findSearchSubmit,
   findSearchbox,
+  isLink,
+  isProductHref,
   parseDeliveryDate,
   parseMovPaise,
   parseMrpPaise,
@@ -57,13 +61,43 @@ function reloginAction(name: string): EngineAction {
  * Compose the search query for an item from brand + variant + name + pack size, so the platform
  * returns the specific SKU the retailer asked for (e.g. "India Gate basmati rice 1 kg") instead of a
  * generic match ("rice"). Falls back to the plain name when no refinements are present.
+ *
+ * Tokens are de-duplicated (case-insensitively, order-preserving) because the parser frequently bakes
+ * the brand into the name too (name="milky mist paneer", brand="Milky Mist"), which would otherwise
+ * yield an over-stuffed "milky mist milky mist paneer 500 g" that some search boxes match poorly.
  */
-function searchQueryFor(item: PlaybookContext["item"]): string {
+export function searchQueryFor(item: PlaybookContext["item"]): string {
   if (!item) return "";
-  return [item.brand, item.variant, item.name, item.packSize]
-    .map((part) => (part ?? "").trim())
-    .filter((part) => part.length > 0)
-    .join(" ");
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const part of [item.brand, item.variant, item.name, item.packSize]) {
+    for (const token of (part ?? "").trim().split(/\s+/)) {
+      if (token.length === 0) continue;
+      const key = token.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      tokens.push(token);
+    }
+  }
+  return tokens.join(" ");
+}
+
+/**
+ * The product detail URL for a matched card. Prefer the card's own href; on tiles where the clickable
+ * card is a `<div>` (Hyperpure) the link is a nearby `<a>`, so fall back to the closest product-link
+ * anchor in the same tile (by bbox proximity). Returns undefined when no product link is present.
+ */
+function productHref(card: SerializedElement, elements?: Elements): string | undefined {
+  if (isProductHref(card.attrs.href)) return card.attrs.href ?? undefined;
+  if (!elements) return undefined;
+  const [cx, cy] = [card.bbox[0], card.bbox[1]];
+  let best: { href: string; dist: number } | undefined;
+  for (const el of elements) {
+    if (!isLink(el) || !isProductHref(el.attrs.href)) continue;
+    const dist = Math.abs(el.bbox[0] - cx) + Math.abs(el.bbox[1] - cy);
+    if (!best || dist < best.dist) best = { href: el.attrs.href as string, dist };
+  }
+  return best?.href;
 }
 
 /**
@@ -95,6 +129,8 @@ export function buildQuoteDraft(
     pricePaise,
     mrpPaise: parseMrpPaise(text),
     inStock: parseInStock(text),
+    // The card's own link is the product detail page; checkout re-opens it to add the exact SKU.
+    productUrl: productHref(card, elements),
     stockCap: parseStockCap(text),
     deliveryDate: parseDeliveryDate(text),
     movPaise: parseMovPaise(text),
@@ -132,6 +168,18 @@ export function buildPlaybooks(labels: PlatformLabels): Playbooks {
     return { type: "extract", data: draft };
   };
 
+  const setQuantity: PlaybookStep = (ctx: PlaybookContext): EngineAction | null => {
+    const els = ctx.observation.elements;
+    if (detectReloginNeeded(els)) return reloginAction(displayName);
+    const qty = typeof ctx.state.qty === "number" ? ctx.state.qty : 1;
+    // Nothing to set for a single unit; `done` ends this mini-playbook WITHOUT deferring to Claude.
+    if (qty <= 1) return { type: "done" };
+    const sel = findQuantitySelector(els);
+    if (!sel) return { type: "done" }; // No selector (e.g. a +/- stepper) — the add loop handles it.
+    if (sel.value != null && sel.value.trim() === String(qty)) return { type: "done" };
+    return { type: "select", idx: sel.idx, value: String(qty) };
+  };
+
   const addToCart: PlaybookStep = (ctx: PlaybookContext): EngineAction | null => {
     const els = ctx.observation.elements;
     if (detectReloginNeeded(els)) return reloginAction(displayName);
@@ -139,6 +187,14 @@ export function buildPlaybooks(labels: PlatformLabels): Playbooks {
     const btn = findAddToCart(els, skuId);
     if (!btn) return null;
     return { type: "click", idx: btn.idx };
+  };
+
+  const clearCart: PlaybookStep = (ctx: PlaybookContext): EngineAction | null => {
+    const els = ctx.observation.elements;
+    if (detectReloginNeeded(els)) return reloginAction(displayName);
+    const remove = findCartRemoveControl(els);
+    if (!remove) return { type: "done" }; // Cart is already empty — nothing left to remove.
+    return { type: "click", idx: remove.idx };
   };
 
   const checkout: PlaybookStep = (ctx: PlaybookContext): EngineAction | null => {
@@ -166,7 +222,9 @@ export function buildPlaybooks(labels: PlatformLabels): Playbooks {
   return {
     search: { name: `${labels.platform}:search`, steps: [typeQuery, submitSearch] },
     readProduct: { name: `${labels.platform}:readProduct`, steps: [readProduct] },
+    setQuantity: { name: `${labels.platform}:setQuantity`, steps: [setQuantity] },
     addToCart: { name: `${labels.platform}:addToCart`, steps: [addToCart] },
+    clearCart: { name: `${labels.platform}:clearCart`, steps: [clearCart] },
     checkout: { name: `${labels.platform}:checkout`, steps: [checkout] },
   };
 }

@@ -7,8 +7,11 @@ import { MockBridge } from "./MockBridge";
 import {
   CircuitBreakerError,
   WebViewAutomationEngine,
+  looksLikeLoginWall,
   type Playbooks,
 } from "./WebViewAutomationEngine";
+import { buildPlaybooks } from "../adapters/playbooks/common";
+import { readCartLines } from "../adapters/selectors";
 
 function makeBackend(over: Partial<BackendClient> = {}): BackendClient {
   const backend: BackendClient = {
@@ -117,6 +120,89 @@ describe("WebViewAutomationEngine with MockBridge", () => {
       expect(added.qty).toBe(1);
       expect(added.cartCount).toBe(1);
     }
+  });
+
+  it("sets the product-page quantity selector to the full count before adding (qty > 1)", async () => {
+    document.body.innerHTML = `
+      <select name="quantity">
+        <option value="1">1</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4">4</option>
+        <option value="5">5</option>
+      </select>
+      <button id="add">Add to cart</button>
+      <a id="cart" href="/cart">Cart (0)</a>
+    `;
+    const cart = document.getElementById("cart")!;
+    const qty = document.querySelector<HTMLSelectElement>('select[name="quantity"]')!;
+    let count = 0;
+    document.getElementById("add")!.addEventListener("click", () => {
+      // A single click adds however many units the quantity selector is set to (Amazon behaviour).
+      count += Number(qty.value);
+      cart.textContent = `Cart (${count})`;
+    });
+
+    // On a real product page the add button doesn't carry the SKU, so the playbook defers to Claude to
+    // locate it — mirror that here by resolving the add-to-cart click from the backend.
+    const clickAddViaClaude: BackendClient["nextAction"] = async ({ observation }) => {
+      const btn = observation.elements.find((e) => /add to cart/i.test(e.name));
+      return btn ? { type: "click", idx: btn.idx } : { type: "fail", reason: "no add button" };
+    };
+    const engine = new WebViewAutomationEngine({
+      platform: "amazon",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({ nextAction: clickAddViaClaude }),
+      playbooks: buildPlaybooks({ platform: "amazon", displayName: "Amazon" }),
+    });
+    const events: DomainEvent[] = [];
+    engine.on((e) => events.push(e));
+
+    await engine.addToCart("B078KT9RB1", 5);
+
+    expect(qty.value).toBe("5"); // selector driven to the requested quantity in one shot
+    const added = events.find((e) => e.type === "ItemAddedToCart");
+    expect(added).toBeDefined();
+    if (added && added.type === "ItemAddedToCart") {
+      expect(added.qty).toBe(5);
+      expect(added.cartCount).toBe(5); // one click added all five
+    }
+  });
+
+  it("clearCart removes pre-existing items until the cart reads empty", async () => {
+    document.body.innerHTML = `
+      <div id="rowA">
+        <a href="/dp/B0AAAAAAAA/ref=ox_sc_act_title_1">Old Luggage Bag ₹250</a>
+        <button class="del" data-row="rowA">Delete</button>
+      </div>
+      <div id="rowB">
+        <a href="/dp/B0BBBBBBBB/ref=ox_sc_act_title_2">Old Book ₹90</a>
+        <button class="del" data-row="rowB">Delete</button>
+      </div>
+    `;
+    for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>("button.del"))) {
+      btn.addEventListener("click", () => {
+        document.getElementById(btn.dataset.row!)?.remove();
+      });
+    }
+
+    const engine = new WebViewAutomationEngine({
+      platform: "amazon",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend(),
+      playbooks: buildPlaybooks({ platform: "amazon", displayName: "Amazon" }),
+      cartReader: (obs) => ({
+        platform: "amazon",
+        lines: readCartLines(obs.elements),
+        subtotalPaise: 0,
+      }),
+    });
+
+    expect(document.querySelectorAll("button.del")).toHaveLength(2);
+    await engine.clearCart();
+
+    expect(document.getElementById("rowA")).toBeNull();
+    expect(document.getElementById("rowB")).toBeNull();
   });
 
   it("falls back to screenshot + vision when DOM extraction yields no quote", async () => {
@@ -344,3 +430,52 @@ function cartEl(name: string): SerializedElement {
     attrs: { type: null, name: null, href: "/cart" },
   };
 }
+
+function linkEl(name: string, href: string | null): SerializedElement {
+  return {
+    idx: 0,
+    tag: "a",
+    role: null,
+    name,
+    value: null,
+    bbox: [0, 0, 0, 0],
+    attrs: { type: null, name: null, href },
+  };
+}
+
+function obs(elements: SerializedElement[], url = "https://www.amazon.in/"): Observation {
+  return { url, title: "", scroll: { y: 0, h: 0, vh: 0 }, elements };
+}
+
+describe("looksLikeLoginWall", () => {
+  it("treats a logged-OUT Amazon home as a wall even though it shows 'your account' / 'Hello, sign in'", () => {
+    // Exact shape from the device log: both links deep-link to /ap/signin while logged out.
+    const page = obs([
+      linkEl("Sign in ›", "https://www.amazon.in/ap/signin?openid.return_to=x"),
+      linkEl("your account", "https://www.amazon.in/ap/signin?openid.return_to=x"),
+      linkEl("Hello, sign in", "https://www.amazon.in/ap/signin"),
+    ]);
+    expect(looksLikeLoginWall(page)).toBe(true);
+  });
+
+  it("treats a page with a real 'Sign Out' affordance as authenticated", () => {
+    const page = obs([
+      linkEl("Hello, Arpan", "/account"),
+      linkEl("Sign Out", "/ap/signout"),
+      linkEl("Your Orders", "/orders"),
+    ]);
+    expect(looksLikeLoginWall(page)).toBe(false);
+  });
+
+  it("treats a logged-in catalog page with no sign-in prompt as authenticated", () => {
+    const page = obs([
+      linkEl("Hello, Arpan", "/account"),
+      cartEl("Cart (2)"),
+    ]);
+    expect(looksLikeLoginWall(page)).toBe(false);
+  });
+
+  it("flags a login URL regardless of content", () => {
+    expect(looksLikeLoginWall(obs([], "https://www.amazon.in/ap/signin"))).toBe(true);
+  });
+});

@@ -42,10 +42,17 @@ public class PlanService {
             String key = canonicalId + "\u0000" + unit;
             Domain.RequestedItem existing = merged.get(key);
             if (existing == null) {
-                merged.put(key, new Domain.RequestedItem(canonicalId, name, qty, unit));
-            } else {
+                // Preserve the brand/variant/pack-size refinements — they are what lets each platform
+                // adapter search for the SPECIFIC SKU (e.g. "Milky Mist paneer 500 g") instead of a
+                // bare "paneer". Dropping them here was silently collapsing the order to a generic item.
                 merged.put(key, new Domain.RequestedItem(
-                        existing.canonicalItemId(), existing.name(), existing.qty() + qty, unit));
+                        canonicalId, name, qty, unit,
+                        item.brand(), item.variant(), item.packSize()));
+            } else {
+                // Keep the first-seen refinements; only the quantity accumulates across merged lines.
+                merged.put(key, new Domain.RequestedItem(
+                        existing.canonicalItemId(), existing.name(), existing.qty() + qty, unit,
+                        existing.brand(), existing.variant(), existing.packSize()));
             }
         }
 

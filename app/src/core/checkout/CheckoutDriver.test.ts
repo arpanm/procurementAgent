@@ -7,7 +7,7 @@ import type {
 } from "../automation/AutomationEngine";
 import type { DomainEvent } from "../automation/events";
 import type { BackendClient, VerifyRequest } from "../backend/BackendClient";
-import type { AllocationLine, PlatformAllocation } from "../domain/types";
+import type { AllocationLine, PlatformAllocation, RequestedItem } from "../domain/types";
 import { InMemorySecureStore } from "../secure/SecureStore";
 import { AuditLog } from "../audit/AuditLog";
 import { CheckoutDriver } from "./CheckoutDriver";
@@ -111,6 +111,9 @@ function makeFakeEngine(opts: {
     addToCart: async (...args) => {
       calls.push("addToCart");
       void args;
+    },
+    clearCart: async () => {
+      calls.push("clearCart");
     },
     getCart,
     checkout,
@@ -302,7 +305,15 @@ describe("CheckoutDriver — OTP/payment hand-off", () => {
 
     // The driver only ever drives high-level engine methods. The way it handles OTP/payment is by
     // revealing the live site and waiting for a human — not by typing.
-    const allowed = new Set(["getCart", "checkout", "show", "placeOrder:hyperpure"]);
+    const allowed = new Set([
+      "search",
+      "clearCart",
+      "addToCart",
+      "getCart",
+      "checkout",
+      "show",
+      "placeOrder:hyperpure",
+    ]);
     for (const call of fake.calls) {
       const base = call.startsWith("placeOrder:") ? "placeOrder:hyperpure" : call;
       expect(allowed.has(base)).toBe(true);
@@ -312,6 +323,94 @@ describe("CheckoutDriver — OTP/payment hand-off", () => {
     for (const forbidden of ["fillOtp", "enterOtp", "typeOtp", "submitPayment", "payWithCard"]) {
       expect(forbidden in fake.engine).toBe(false);
     }
+  });
+});
+
+// ----- cart filling (phase 1 only reads prices; the driver must ADD before verifying) -----
+
+describe("CheckoutDriver — fills the cart before verifying", () => {
+  it("re-searches the item and adds each approved line to the cart, before reading/verifying", async () => {
+    const fake = makeFakeEngine({});
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      backend: makeBackend(),
+      audit,
+      items: [
+        // `canonicalItemId` is a runtime-only field the optimizer keys lines by (omitted from the type).
+        {
+          raw: "5 kg potato",
+          name: "potato",
+          qty: 5,
+          unit: "kg",
+          canonicalItemId: "potato",
+        } as unknown as RequestedItem,
+      ],
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    await driver.run(ALLOCATION);
+
+    // The cart was filled (search → addToCart) BEFORE it was read and verified.
+    const searchIdx = fake.calls.indexOf("search");
+    const addIdx = fake.calls.indexOf("addToCart");
+    const readIdx = fake.calls.indexOf("getCart");
+    expect(searchIdx).toBeGreaterThanOrEqual(0);
+    expect(addIdx).toBeGreaterThan(searchIdx);
+    expect(readIdx).toBeGreaterThan(addIdx);
+
+    const trail = await audit.entries();
+    expect(trail.find((e) => e.action === "cart:add")?.after).toMatchObject({
+      skuId: "hp-potato",
+      qty: 5,
+    });
+  });
+
+  it("empties any pre-existing cart BEFORE adding the approved lines", async () => {
+    const fake = makeFakeEngine({});
+    const { driver } = makeDriver(fake);
+    await driver.run(ALLOCATION);
+
+    const clearIdx = fake.calls.indexOf("clearCart");
+    const addIdx = fake.calls.indexOf("addToCart");
+    expect(clearIdx).toBeGreaterThanOrEqual(0);
+    expect(addIdx).toBeGreaterThan(clearIdx);
+  });
+
+  it("still attempts addToCart when no item is supplied for the line", async () => {
+    const fake = makeFakeEngine({});
+    const { driver } = makeDriver(fake); // no items passed
+    await driver.run(ALLOCATION);
+    expect(fake.calls).toContain("addToCart");
+    // No item known for the line → no re-search.
+    expect(fake.calls).not.toContain("search");
+  });
+
+  it("opens the captured product URL directly (no re-search) when one is known for the line", async () => {
+    const fake = makeFakeEngine({});
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      backend: makeBackend(),
+      audit,
+      items: [
+        { raw: "5 kg potato", name: "potato", qty: 5, unit: "kg", canonicalItemId: "potato" } as unknown as RequestedItem,
+      ],
+      productUrls: new Map([["potato", "https://www.hyperpure.com/in/potato/HP-POTATO"]]),
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    await driver.run(ALLOCATION);
+
+    // With a known product URL the driver re-opens the exact product and adds it — never re-searches.
+    const openIdx = fake.calls.indexOf("open");
+    const addIdx = fake.calls.indexOf("addToCart");
+    expect(openIdx).toBeGreaterThanOrEqual(0);
+    expect(addIdx).toBeGreaterThan(openIdx);
+    expect(fake.calls).not.toContain("search");
+
+    const trail = await audit.entries();
+    expect(trail.find((e) => e.action === "cart:add")?.after).toMatchObject({ via: "product-url" });
   });
 });
 
