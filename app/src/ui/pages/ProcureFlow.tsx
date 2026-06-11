@@ -233,8 +233,13 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
           getAllocation: () => orchestrator.getState().allocation,
         });
       }
-      // Give SPA listings a few seconds to lazy-load priced tiles before readProduct extracts.
-      return createEngine(platform, bridge(), backend, { listingSettleMs: 8000 });
+      // Give SPA listings a few seconds to lazy-load priced tiles before readProduct extracts, and
+      // (Hyperpure only) fall back to a screenshot + vision read when its large grid DOM can't be
+      // serialized over the bridge reliably.
+      return createEngine(platform, bridge(), backend, {
+        listingSettleMs: 8000,
+        visionFallback: platform === "hyperpure",
+      });
     },
     [props.createEngineImpl, isDemo, backend, bridge, orchestrator],
   );

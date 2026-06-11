@@ -109,6 +109,12 @@ export interface WebViewAutomationEngineOptions {
    * sets a few seconds. Uses a real timer (independent of the no-op test `sleep`).
    */
   readonly listingSettleMs?: number;
+  /**
+   * When DOM extraction yields no quote in `readProduct`, capture a webview screenshot and ask the
+   * backend's vision model to read the product. Off by default; enabled for platforms whose listing
+   * DOM is too large to serialize reliably (Hyperpure). Requires `backend.visionExtract`.
+   */
+  readonly visionFallback?: boolean;
   /** Base backoff in ms; the nth retry waits base * 2^n. Default 200. */
   readonly baseBackoffMs?: number;
   /** Clock for `readAt`/timestamps. */
@@ -185,6 +191,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
   private readonly maxActionRetries: number;
   private readonly maxLoopSteps: number;
   private readonly listingSettleMs: number;
+  private readonly visionFallback: boolean;
   private readonly baseBackoffMs: number;
   private readonly now: () => string;
   private readonly otpUrlPatterns: readonly RegExp[];
@@ -208,6 +215,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
     this.maxActionRetries = opts.maxActionRetries ?? 2;
     this.maxLoopSteps = opts.maxLoopSteps ?? 60;
     this.listingSettleMs = opts.listingSettleMs ?? 0;
+    this.visionFallback = opts.visionFallback ?? false;
     this.baseBackoffMs = opts.baseBackoffMs ?? 200;
     this.now = opts.now ?? (() => new Date().toISOString());
     this.otpUrlPatterns = opts.otpUrlPatterns ?? DEFAULT_OTP_URL_PATTERNS;
@@ -261,13 +269,19 @@ export class WebViewAutomationEngine implements AutomationEngine {
       playbook: this.playbooks.readProduct,
       item,
     });
-    if (result.kind !== "extract") {
-      throw new Error(`readProduct(${item.name}): no quote was extracted`);
+    let draft: QuoteDraft | undefined =
+      result.kind === "extract" && isQuoteDraft(result.data) ? result.data : undefined;
+    if (!draft && this.visionFallback) {
+      draft = await this.visionReadProduct(item);
     }
-    if (!isQuoteDraft(result.data)) {
-      throw new Error(`readProduct(${item.name}): extracted data is not a valid quote`);
+    if (!draft) {
+      throw new Error(
+        result.kind !== "extract"
+          ? `readProduct(${item.name}): no quote was extracted`
+          : `readProduct(${item.name}): extracted data is not a valid quote`,
+      );
     }
-    const quote = this.buildQuote(result.data, item);
+    const quote = this.buildQuote(draft, item);
     this.emit({ type: "QuoteRead", platform: this.platform, quote });
     return quote;
   }
@@ -651,11 +665,85 @@ export class WebViewAutomationEngine implements AutomationEngine {
 
   // --- helpers ---------------------------------------------------------------
 
+  /**
+   * Fallback read: screenshot the (rendered) webview and have the backend's vision model read the
+   * best-matching product. For SPA listings whose DOM is too large to serialize over the bridge, the
+   * page paints fine, so a screenshot carries the price where the DOM does not. Returns undefined on
+   * any failure so the caller treats the item as unsourced (never invents a price).
+   */
+  private async visionReadProduct(item: RequestedItem): Promise<QuoteDraft | undefined> {
+    if (!this.backend.visionExtract) return undefined;
+    let restoreHidden = false;
+    try {
+      // A screenshot needs a rendered (shown) webview; reveal briefly if we're scraping hidden.
+      if (this.hidden) {
+        await this.bridge.show(this.webviewId);
+        restoreHidden = true;
+      }
+      // The readProduct loop scrolls the grid down hunting for priced tiles, which can leave the
+      // viewport parked on empty space below the results — yielding a near-blank screenshot the model
+      // can't read. Scroll back to the top (best matches sit in the first rows) before the shot.
+      try {
+        await this.executeAction({ type: "scroll", dy: -1_000_000 });
+      } catch {
+        /* best-effort: a failed scroll must not abort the vision read */
+      }
+      const dataUrl = await this.bridge.screenshot(this.webviewId);
+      const img = parseDataUrl(dataUrl);
+      if (!img) {
+        this.trace("warn", `vision-extract: no screenshot captured (dataUrl len=${(dataUrl ?? "").length})`);
+        return undefined;
+      }
+      // Device-side evidence: a too-small payload means the webview wasn't painted/revealed in time
+      // (blank capture) — distinct from a valid screenshot the model simply couldn't read. A real
+      // Hyperpure listing screenshot is ~1MB of base64; anything tiny is almost certainly blank.
+      const level = img.base64.length < BLANK_SCREENSHOT_BASE64_LEN ? "warn" : "info";
+      this.trace(
+        level,
+        `vision-extract: captured ${img.mimeType} base64Len=${img.base64.length}` +
+          (level === "warn" ? " (looks blank — webview may not have painted)" : ""),
+      );
+      const res = await this.backend.visionExtract({
+        platform: this.platform,
+        item,
+        imageBase64: img.base64,
+        mimeType: img.mimeType,
+      });
+      if (!res.found || typeof res.pricePaise !== "number" || !res.title) {
+        this.trace("info", `vision-extract: no matching product in screenshot for "${item.name}"`);
+        return undefined;
+      }
+      this.trace(
+        "info",
+        `vision-extract → "${res.title}" ₹${(res.pricePaise / 100).toFixed(2)} inStock=${res.inStock ?? true}`,
+      );
+      return {
+        skuId: res.skuId ?? slugify(res.title),
+        canonicalItemId: canonicalIdOf(item),
+        title: res.title,
+        pricePaise: res.pricePaise,
+        mrpPaise: res.mrpPaise,
+        inStock: res.inStock ?? true,
+      };
+    } catch (e) {
+      this.trace("warn", `vision-extract failed: ${String(e)}`);
+      return undefined;
+    } finally {
+      if (restoreHidden) {
+        try {
+          await this.bridge.hide(this.webviewId);
+        } catch {
+          /* best-effort restore */
+        }
+      }
+    }
+  }
+
   private buildQuote(draft: QuoteDraft, item: RequestedItem): Quote {
     return {
       platform: this.platform,
       skuId: draft.skuId,
-      canonicalItemId: draft.canonicalItemId ?? item.name,
+      canonicalItemId: draft.canonicalItemId ?? canonicalIdOf(item),
       title: draft.title,
       pricePaise: draft.pricePaise,
       mrpPaise: draft.mrpPaise,
@@ -740,6 +828,13 @@ export class WebViewAutomationEngine implements AutomationEngine {
 
 const PRICE_TEXT_RE = /(?:₹|rs\.?|inr)\s*[\d,]/i;
 
+/**
+ * Below this base64 length a webview screenshot is almost certainly blank (a painted Hyperpure listing
+ * is ~1MB of base64; an empty/early capture is tens of KB). Used purely to flag the likely cause in the
+ * trace, not to fail — the vision model still gets a fair shot at whatever was captured.
+ */
+const BLANK_SCREENSHOT_BASE64_LEN = 60_000;
+
 /** Count elements whose text carries a price — a proxy for "the product grid has rendered". */
 function countPricedElements(obs: Observation): number {
   let n = 0;
@@ -780,6 +875,36 @@ function hasPricedItem(obs: Observation, item?: RequestedItem): boolean {
 
 function findByIdx(obs: Observation, idx: number): SerializedElement | undefined {
   return obs.elements.find((el) => el.idx === idx);
+}
+
+/**
+ * The on-device {@link RequestedItem} carries a `canonicalItemId` at runtime (the backend `/intent`
+ * and `/plan` responses include it) even though the TS type omits it. The optimizer maps quotes to
+ * demand by this id — which the backend normalizes to lowercase-no-spaces (e.g. "spring onion" →
+ * "springonion") — so a quote MUST be stamped with it, not the spaced display name, or multi-word
+ * items never match and surface as "could not source". Fall back to the display name when absent.
+ */
+function canonicalIdOf(item: RequestedItem): string {
+  const maybe = (item as { canonicalItemId?: unknown }).canonicalItemId;
+  return typeof maybe === "string" && maybe.length > 0 ? maybe : item.name;
+}
+
+/** Split a `data:<mime>;base64,<payload>` URL into its media type and raw base64 payload. */
+function parseDataUrl(dataUrl: string): { base64: string; mimeType: string } | undefined {
+  const m = /^data:([^;,]+)?(?:;base64)?,(.*)$/s.exec(dataUrl ?? "");
+  if (!m) return undefined;
+  const base64 = m[2] ?? "";
+  if (!base64) return undefined;
+  return { base64, mimeType: m[1] || "image/png" };
+}
+
+/** Stable SKU id from a title (no href available from a screenshot). */
+function slugify(s: string): string {
+  const out = s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-+|-+$)/g, "");
+  return out.slice(0, 64) || "vision-sku";
 }
 
 const LOGIN_URL_RE = /\/(login|signin|sign-in|auth|account\/(login|signin))\b/i;

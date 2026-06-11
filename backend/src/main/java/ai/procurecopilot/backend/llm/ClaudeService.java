@@ -47,7 +47,9 @@ public class ClaudeService {
                 request.task(),
                 scrubber.scrub(request.system()),
                 scrubber.scrub(request.user()),
-                request.maxTokens());
+                request.maxTokens(),
+                request.imageBase64(),
+                request.imageMediaType());
 
         if (props.isStub()) {
             ClaudeResponder responder = responders.get(scrubbed.task());
@@ -66,7 +68,7 @@ public class ClaudeService {
                 "model", props.model(),
                 "max_tokens", maxTokens,
                 "system", request.system() == null ? "" : request.system(),
-                "messages", List.of(Map.of("role", "user", "content", request.user())));
+                "messages", List.of(Map.of("role", "user", "content", userContent(request))));
         try {
             String raw = webClient.post()
                     .uri("/v1/messages")
@@ -82,6 +84,25 @@ public class ClaudeService {
         } catch (Exception e) {
             throw new ClaudeException("Anthropic call failed for task " + request.task(), e);
         }
+    }
+
+    /**
+     * The Anthropic message {@code content}: a plain string for text-only calls, or an
+     * [image, text] block array when the request carries a screenshot (multimodal vision-extract).
+     */
+    private Object userContent(ClaudeRequest request) {
+        String text = request.user() == null ? "" : request.user();
+        if (!request.hasImage()) {
+            return text;
+        }
+        String mediaType = request.imageMediaType() == null ? "image/png" : request.imageMediaType();
+        Map<String, Object> image = Map.of(
+                "type", "image",
+                "source", Map.of(
+                        "type", "base64",
+                        "media_type", mediaType,
+                        "data", request.imageBase64()));
+        return List.of(image, Map.of("type", "text", "text", text));
     }
 
     private String extractText(String raw) {

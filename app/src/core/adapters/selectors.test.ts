@@ -110,6 +110,34 @@ describe("findResultCard", () => {
     expect(findNearbyPriceEl([title, priceBelow, otherColumn], title)?.idx).toBe(51);
   });
 
+  it("ignores Amazon filter links whose VISIBLE text contains the query token", () => {
+    // The real-world failure: "Apply the filter Chicken Coop to narrow results" literally contains
+    // "chicken" and sits next to a price, so a plain token match would wrongly extract it as a product.
+    const chickenItem = {
+      raw: "chicken",
+      canonicalItemId: "chicken",
+      name: "chicken",
+      qty: 1,
+      unit: "kg" as const,
+    };
+    const filter = el({
+      idx: 26,
+      tag: "a",
+      role: "listitem",
+      name: "Apply the filter Chicken Coop to narrow results",
+      attrs: { type: null, name: null, href: "/s?k=chicken&rh=p_36%3A20000-25000" },
+    });
+    const product = el({
+      idx: 90,
+      tag: "a",
+      name: "Licious Chicken Breast Boneless 500 g ₹250",
+      attrs: { type: null, name: null, href: "/dp/B0CHICK" },
+    });
+    expect(findResultCard([filter, product], chickenItem)?.idx).toBe(90);
+    // And with no real product present, the filter link must NOT be returned.
+    expect(findResultCard([filter], chickenItem)).toBeUndefined();
+  });
+
   it("ignores controls (search box / ADD button)", () => {
     const input = el({ idx: 1, tag: "input", role: "searchbox", name: "rice", value: "rice" });
     const addBtn = el({ idx: 2, tag: "button", name: "ADD rice" });

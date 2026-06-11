@@ -50,6 +50,23 @@ export interface IntentResponse {
   readonly confidence: number;
 }
 
+export interface VisionExtractRequest {
+  readonly platform: PlatformId;
+  readonly item: RequestedItem;
+  /** Raw base64 PNG payload (no `data:` prefix). */
+  readonly imageBase64: string;
+  readonly mimeType: string;
+}
+
+export interface VisionExtractResponse {
+  readonly found: boolean;
+  readonly skuId?: string;
+  readonly title?: string;
+  readonly pricePaise?: number;
+  readonly mrpPaise?: number;
+  readonly inStock?: boolean;
+}
+
 export interface OptimizeRequest {
   readonly items: readonly RequestedItem[];
   readonly quotes: readonly Quote[];
@@ -67,6 +84,12 @@ export interface BackendClient {
   nextAction(req: NextActionRequest): Promise<EngineAction>;
   verify(req: VerifyRequest): Promise<VerifyResponse>;
   optimize(req: OptimizeRequest): Promise<Allocation>;
+  /**
+   * Read the best-matching product (title/price) from a webview screenshot via the backend's vision
+   * model. Optional: used as a fallback when DOM serialization can't deliver a usable listing snapshot
+   * (e.g. Hyperpure's large virtualized grid). Mocks/tests may omit it.
+   */
+  visionExtract?(req: VisionExtractRequest): Promise<VisionExtractResponse>;
   appendEvent(sessionId: string, event: unknown): Promise<void>;
   createSession(req: unknown): Promise<{ id: string }>;
   getSession(sessionId: string): Promise<unknown>;
@@ -207,6 +230,10 @@ export class HttpBackendClient implements BackendClient {
 
   optimize(req: OptimizeRequest): Promise<Allocation> {
     return this.post<Allocation>("/optimize", req);
+  }
+
+  visionExtract(req: VisionExtractRequest): Promise<VisionExtractResponse> {
+    return this.post<VisionExtractResponse>("/vision/extract", req);
   }
 
   appendEvent(sessionId: string, event: unknown): Promise<void> {

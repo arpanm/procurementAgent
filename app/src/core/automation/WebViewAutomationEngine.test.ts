@@ -119,6 +119,152 @@ describe("WebViewAutomationEngine with MockBridge", () => {
     }
   });
 
+  it("falls back to screenshot + vision when DOM extraction yields no quote", async () => {
+    document.body.innerHTML = ``; // no product DOM → readProduct can't extract from elements
+
+    const visionCalls: { platform: string; imageBase64: string; mimeType: string }[] = [];
+    const bridge = new MockBridge({ doc: document });
+    const engine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge,
+      backend: makeBackend({
+        // Defer (no playbook extract) → loop ends with "done", triggering the vision fallback.
+        nextAction: async () => ({ type: "done" }),
+        visionExtract: async (req) => {
+          visionCalls.push({
+            platform: req.platform,
+            imageBase64: req.imageBase64,
+            mimeType: req.mimeType,
+          });
+          return {
+            found: true,
+            title: "Daawat Basmati Rice 5 Kg",
+            pricePaise: 65800,
+            inStock: true,
+          };
+        },
+      }),
+      playbooks: { readProduct: { name: "read", steps: [() => null] } },
+      visionFallback: true,
+    });
+    const events: DomainEvent[] = [];
+    engine.on((e) => events.push(e));
+
+    const quote = await engine.readProduct(onion);
+    expect(quote.pricePaise).toBe(65800);
+    expect(quote.title).toBe("Daawat Basmati Rice 5 Kg");
+    expect(quote.skuId).toBe("daawat-basmati-rice-5-kg");
+    expect(quote.platform).toBe("hyperpure");
+
+    // The screenshot was captured and forwarded (base64 from the data URL) to the backend.
+    expect(visionCalls).toHaveLength(1);
+    expect(visionCalls[0].imageBase64).toBe("MOCK");
+    expect(visionCalls[0].platform).toBe("hyperpure");
+    expect(bridge.screenshotCount).toBe(1);
+    // The hidden webview is revealed for the shot then restored.
+    expect(bridge.shownIds).toContain("hyperpure");
+    expect(bridge.hiddenIds).toContain("hyperpure");
+    expect(events.some((e) => e.type === "QuoteRead")).toBe(true);
+  });
+
+  it("stamps quotes with the item's runtime canonicalItemId (multi-word), not the spaced name", async () => {
+    // The backend normalizes ids to lowercase-no-spaces ("spring onion" → "springonion") and the
+    // optimizer maps quotes to demand by that id. If a quote carries the spaced display name instead,
+    // multi-word items never match and surface as "could not source". Cover both read paths.
+    const springOnion = {
+      raw: "10kg spring onion",
+      name: "spring onion",
+      qty: 10,
+      unit: "kg",
+      canonicalItemId: "springonion",
+    } as unknown as RequestedItem;
+
+    // Vision path (no DOM to extract from).
+    document.body.innerHTML = ``;
+    const visionEngine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({
+        nextAction: async () => ({ type: "done" }),
+        visionExtract: async () => ({
+          found: true,
+          title: "Fresh Spring Onion 250 g",
+          pricePaise: 4500,
+          inStock: true,
+        }),
+      }),
+      playbooks: { readProduct: { name: "read", steps: [() => null] } },
+      visionFallback: true,
+    });
+    const visionQuote = await visionEngine.readProduct(springOnion);
+    expect(visionQuote.canonicalItemId).toBe("springonion");
+
+    // DOM path: a product card whose extract yields a real draft.
+    document.body.innerHTML = `<a href="/p/spring-onion-1">Fresh Spring Onion 250 g · ₹45</a>`;
+    const domEngine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend(),
+      playbooks: {
+        readProduct: {
+          name: "read",
+          steps: [
+            (ctx) => {
+              const a = ctx.observation.elements.find((e) => e.tag === "a");
+              return a
+                ? {
+                    type: "extract",
+                    data: {
+                      skuId: "spring-onion-1",
+                      title: "Fresh Spring Onion 250 g",
+                      pricePaise: 4500,
+                      inStock: true,
+                    },
+                  }
+                : null;
+            },
+          ],
+        },
+      },
+    });
+    const domQuote = await domEngine.readProduct(springOnion);
+    expect(domQuote.canonicalItemId).toBe("springonion");
+  });
+
+  it("throws (item unsourced) when vision finds no matching product", async () => {
+    document.body.innerHTML = ``;
+    const engine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({
+        nextAction: async () => ({ type: "done" }),
+        visionExtract: async () => ({ found: false }),
+      }),
+      playbooks: { readProduct: { name: "read", steps: [() => null] } },
+      visionFallback: true,
+    });
+    await expect(engine.readProduct(onion)).rejects.toThrow(/no quote/);
+  });
+
+  it("does NOT use vision fallback when the option is off (default)", async () => {
+    document.body.innerHTML = ``;
+    let visionCalled = false;
+    const engine = new WebViewAutomationEngine({
+      platform: "amazon",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({
+        nextAction: async () => ({ type: "done" }),
+        visionExtract: async () => {
+          visionCalled = true;
+          return { found: true, title: "X", pricePaise: 100, inStock: true };
+        },
+      }),
+      playbooks: { readProduct: { name: "read", steps: [() => null] } },
+    });
+    await expect(engine.readProduct(onion)).rejects.toThrow(/no quote/);
+    expect(visionCalled).toBe(false);
+  });
+
   it("verifyStepEffect catches a no-op and accepts a real change", () => {
     const engine = new WebViewAutomationEngine({
       platform: "amazon",

@@ -95,7 +95,27 @@ function cardText(el: SerializedElement): string {
   return lower(`${el.name} ${el.value ?? ""} ${el.attrs.name ?? ""}`);
 }
 
+/**
+ * Amazon's left-rail refinement links read like products: "Apply the filter Chicken Coop to narrow
+ * results" literally contains the query token ("chicken") in its VISIBLE text (so a token match alone
+ * can't reject it) and a nearby price element lets it masquerade as a real tile. These never lead to a
+ * SKU, so we reject them by their unmistakable nav phrasing.
+ */
+const FILTER_CHROME = /\bapply the filter\b|\bnarrow results\b|\bsort by\b|\bdid you mean\b/i;
+
+/** True for nav/refinement chrome (Amazon filter links, sort controls) that is never a buyable product. */
+export function isNonProductChrome(el: SerializedElement): boolean {
+  if (FILTER_CHROME.test(cardText(el))) return true;
+  // A search-refinement link (`/s?k=…&rh=…`) is a filter, not a product detail page (`/dp/…`).
+  if (isLink(el)) {
+    const href = lower(el.attrs.href);
+    if (href && /[?&]rh=/.test(href) && !/\/dp\/|\/gp\/product/.test(href)) return true;
+  }
+  return false;
+}
+
 function scoreCard(el: SerializedElement, item: RequestedItem): number {
+  if (isNonProductChrome(el)) return 0;
   const text = cardText(el);
   const tokens = itemTokens(item);
   if (tokens.length === 0) return 0;
