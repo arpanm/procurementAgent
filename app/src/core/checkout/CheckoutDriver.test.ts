@@ -414,6 +414,61 @@ describe("CheckoutDriver — fills the cart before verifying", () => {
   });
 });
 
+// ----- stageCart: cart hand-off mode (best-effort add, no clear/verify/place) -----
+
+describe("CheckoutDriver — stageCart (cart hand-off)", () => {
+  it("adds the lines best-effort and returns cart_filled with the cart URL", async () => {
+    const fake = makeFakeEngine({});
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      backend: makeBackend(),
+      items: [
+        { raw: "5 kg potato", name: "potato", qty: 5, unit: "kg", canonicalItemId: "potato" } as unknown as RequestedItem,
+      ],
+      audit,
+      cartUrl: "https://www.hyperpure.com/in/cart",
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    const attempt = await driver.stageCart(ALLOCATION);
+
+    expect(attempt.status).toBe("cart_filled");
+    expect(attempt.cartUrl).toBe("https://www.hyperpure.com/in/cart");
+    expect(attempt.stagedLineCount).toBe(1);
+    expect(attempt.totalPaise).toBe(5000);
+    expect(fake.calls).toContain("addToCart");
+  });
+
+  it("NEVER clears the cart, verifies, checks out, or places an order", async () => {
+    const fake = makeFakeEngine({});
+    const { driver } = makeDriver(fake);
+
+    await driver.stageCart(ALLOCATION);
+
+    expect(fake.calls).not.toContain("clearCart");
+    expect(fake.calls).not.toContain("getCart");
+    expect(fake.checkout).not.toHaveBeenCalled();
+    expect(fake.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it("counts only the lines that were actually added", async () => {
+    const fake = makeFakeEngine({});
+    // Make addToCart fail to simulate an unavailable product.
+    (fake.engine as { addToCart: AutomationEngine["addToCart"] }).addToCart = async () => {
+      throw new Error("out of stock");
+    };
+    const { driver, audit } = makeDriver(fake);
+
+    const attempt = await driver.stageCart(ALLOCATION);
+
+    expect(attempt.status).toBe("cart_filled");
+    expect(attempt.stagedLineCount).toBe(0);
+    const trail = await audit.entries();
+    expect(trail.find((e) => e.action === "cart:add-failed")).toBeTruthy();
+  });
+});
+
 // ----- credit_ok happy path + idempotency -----
 
 describe("CheckoutDriver — placement & idempotency", () => {

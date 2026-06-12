@@ -19,7 +19,7 @@ import {
 } from "../automation/WebViewAutomationEngine";
 import { AMAZON_PLAYBOOK_VERSION, amazonPlaybooks } from "./playbooks/amazon";
 import { HYPERPURE_PLAYBOOK_VERSION, hyperpurePlaybooks } from "./playbooks/hyperpure";
-import { readCartLines } from "./selectors";
+import { readCartLines, asinFromUrl } from "./selectors";
 
 /** Health indicator surfaced to the UI for the per-platform banner. */
 export interface PlatformHealth {
@@ -40,6 +40,8 @@ interface PlatformConfig {
   readonly playbookVersion: string;
   /** Cart-page URL `getCart` navigates to before reading the cart for verification. */
   readonly cartUrl: string;
+  /** Optional server-side add-to-cart URL builder from the current product URL + quantity. */
+  readonly cartAddUrl?: (currentUrl: string, qty: number) => string | null;
 }
 
 const PLATFORM_CONFIG: Readonly<Record<PlatformId, PlatformConfig>> = {
@@ -52,6 +54,15 @@ const PLATFORM_CONFIG: Readonly<Record<PlatformId, PlatformConfig>> = {
     playbooks: amazonPlaybooks,
     playbookVersion: AMAZON_PLAYBOOK_VERSION,
     cartUrl: "https://www.amazon.in/gp/cart/view.html",
+    // Amazon's mobile detail-page "Add to cart" handler is dead (its JS double-loads), so add via the
+    // documented server-side cart-add endpoint instead — it adds the exact quantity in one round-trip
+    // and honours the logged-in session. Needs the ASIN, which we lift from the current product URL.
+    cartAddUrl: (currentUrl, qty) => {
+      const asin = asinFromUrl(currentUrl);
+      if (!asin) return null;
+      const q = Math.max(1, Math.floor(qty));
+      return `https://www.amazon.in/gp/aws/cart/add.html?ASIN.1=${asin}&Quantity.1=${q}`;
+    },
   },
 };
 
@@ -123,6 +134,7 @@ export function createEngine(
     // empty cart, which would make verification fail no matter what add-to-cart did). Overridable.
     cartReader: platformCartReader,
     cartUrl: PLATFORM_CONFIG[platform].cartUrl,
+    cartAddUrl: PLATFORM_CONFIG[platform].cartAddUrl,
     ...opts,
     platform,
     bridge,

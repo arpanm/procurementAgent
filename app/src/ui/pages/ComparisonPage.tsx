@@ -22,13 +22,38 @@ import {
   IonSpinner,
   IonText,
 } from "@ionic/react";
-import type { Allocation, AllocationLine, PlatformId } from "../../core/domain/types";
+import type {
+  Allocation,
+  AllocationLine,
+  PlatformId,
+  Quote,
+  RequestedItem,
+} from "../../core/domain/types";
 import { formatRupees, SUPPORTED_PLATFORMS } from "../../core/domain/types";
 import type { ReadableStore } from "../../core/orchestrator/store";
 import type { ModifyChange, SessionState } from "../../core/orchestrator/session";
 import { explainAllocation } from "../../core/optimizer/OptimizerClient";
+import { parsePackSize, perUnitPrice, comparableUnitPaise } from "../../core/pricing/packPricing";
+import { packsNeeded } from "../../core/pricing/quantityReconcile";
 import { AllocationCard } from "../components/AllocationCard";
 import { BrandHeader } from "../components/BrandHeader";
+
+const PLATFORM_LABELS: Record<PlatformId, string> = {
+  hyperpure: "Hyperpure",
+  amazon: "Amazon.in",
+};
+
+/** The runtime `canonicalItemId` the backend stamps on each item (the TS type omits it). */
+function itemCanonicalId(item: RequestedItem): string {
+  const maybe = (item as { canonicalItemId?: unknown }).canonicalItemId;
+  return typeof maybe === "string" && maybe.length > 0 ? maybe : item.name;
+}
+
+/** A per-unit price label like "₹198/kg", or the empty string when the pack size is unknown. */
+function perUnitLabel(quote: Quote): string {
+  const per = perUnitPrice(quote.pricePaise, parsePackSize(quote.packSize ?? quote.title));
+  return per ? `${formatRupees(per.pricePaise)}/${per.unitLabel}` : "";
+}
 
 /** The minimal orchestrator surface this page needs (the real Orchestrator satisfies it). */
 export interface ComparisonOrchestrator extends ReadableStore<SessionState> {
@@ -89,6 +114,40 @@ export function ComparisonPage({
       return item?.qty ?? 0;
     },
     [state.items],
+  );
+
+  /** All collected quotes grouped by canonical item, so we can show every platform option per item. */
+  const quotesByItem = useMemo(() => {
+    const map = new Map<string, Quote[]>();
+    for (const quote of state.quotes) {
+      const arr = map.get(quote.canonicalItemId) ?? [];
+      arr.push(quote);
+      map.set(quote.canonicalItemId, arr);
+    }
+    return map;
+  }, [state.quotes]);
+
+  /** Which platform an item is currently assigned to (user pin first, else the allocation's pick). */
+  const selectedPlatformFor = useCallback(
+    (canonicalItemId: string): PlatformId | undefined => {
+      if (state.pins[canonicalItemId]) {
+        return state.pins[canonicalItemId];
+      }
+      for (const p of allocation?.perPlatform ?? []) {
+        if (p.lines.some((l) => l.canonicalItemId === canonicalItemId)) {
+          return p.platform;
+        }
+      }
+      return undefined;
+    },
+    [allocation, state.pins],
+  );
+
+  const handleChoosePlatform = useCallback(
+    (canonicalItemId: string, itemName: string, platform: PlatformId) => {
+      void orchestrator.modify({ kind: "swap-platform", canonicalItemId, itemName, platform });
+    },
+    [orchestrator],
   );
 
   const handleProceed = useCallback(() => {
@@ -219,6 +278,162 @@ export function ComparisonPage({
                 <p className="pc-savings-hero__sub">Best available split across platforms</p>
               </div>
             )}
+
+            {state.items.length > 0 ? (
+              <div className="pc-section" data-testid="item-choices">
+                <h3 className="pc-section__title" style={{ marginBottom: "0.5rem" }}>
+                  Choose per item
+                </h3>
+                {state.items.map((item) => {
+                  const canonicalItemId = itemCanonicalId(item);
+                  const quotes = (quotesByItem.get(canonicalItemId) ?? [])
+                    .slice()
+                    .sort(
+                      (a, b) =>
+                        SUPPORTED_PLATFORMS.indexOf(a.platform) -
+                        SUPPORTED_PLATFORMS.indexOf(b.platform),
+                    );
+                  if (quotes.length === 0) {
+                    return null;
+                  }
+                  const inStockUnits = quotes
+                    .filter((q) => q.inStock)
+                    .map((q) => comparableUnitPaise(q.pricePaise, q.packSize ?? q.title));
+                  const bestUnit = inStockUnits.length > 0 ? Math.min(...inStockUnits) : undefined;
+                  const selected = selectedPlatformFor(canonicalItemId);
+                  return (
+                    <div
+                      className="pc-card"
+                      key={canonicalItemId}
+                      data-testid={`choice-${canonicalItemId}`}
+                      style={{ marginBottom: "0.75rem" }}
+                    >
+                      <div className="pc-card__head">
+                        <span className="pc-platform__name" style={{ fontSize: "1rem" }}>
+                          {item.name}
+                          {item.qty ? ` ×${item.qty}` : ""}
+                        </span>
+                        {item.packSize ? (
+                          <IonNote>you asked: {item.packSize}</IonNote>
+                        ) : null}
+                      </div>
+                      <div className="pc-card__body" style={{ display: "grid", gap: "0.5rem" }}>
+                        {quotes.map((quote) => {
+                          const unit = comparableUnitPaise(quote.pricePaise, quote.packSize ?? quote.title);
+                          const isBest =
+                            quote.inStock && bestUnit !== undefined && unit === bestUnit;
+                          const isSelected = selected === quote.platform;
+                          const perLabel = perUnitLabel(quote);
+                          const packs = packsNeeded(item, quote);
+                          return (
+                            <button
+                              type="button"
+                              key={quote.platform + quote.skuId}
+                              data-testid={`choice-${canonicalItemId}-${quote.platform}`}
+                              aria-pressed={isSelected}
+                              disabled={decided || !quote.inStock}
+                              onClick={() =>
+                                handleChoosePlatform(canonicalItemId, item.name, quote.platform)
+                              }
+                              className="pc-choice"
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                alignItems: "center",
+                                gap: "0.75rem",
+                                width: "100%",
+                                textAlign: "left",
+                                padding: "0.75rem",
+                                borderRadius: "12px",
+                                border: isSelected
+                                  ? "2px solid var(--ion-color-primary)"
+                                  : "1px solid rgba(var(--ion-text-color-rgb,0,0,0),0.12)",
+                                background: isSelected
+                                  ? "rgba(var(--ion-color-primary-rgb),0.08)"
+                                  : "transparent",
+                                opacity: quote.inStock ? 1 : 0.5,
+                                cursor: decided || !quote.inStock ? "default" : "pointer",
+                              }}
+                            >
+                              <span style={{ minWidth: 0 }}>
+                                <span
+                                  style={{
+                                    display: "block",
+                                    fontWeight: 600,
+                                    color: "var(--ion-text-color)",
+                                  }}
+                                >
+                                  {PLATFORM_LABELS[quote.platform]}
+                                  {isBest ? (
+                                    <span
+                                      style={{
+                                        marginLeft: "0.5rem",
+                                        fontSize: "0.7rem",
+                                        fontWeight: 700,
+                                        color: "var(--ion-color-success)",
+                                      }}
+                                    >
+                                      BEST VALUE
+                                    </span>
+                                  ) : null}
+                                </span>
+                                <span
+                                  style={{
+                                    display: "block",
+                                    fontSize: "0.8rem",
+                                    color: "var(--ion-color-medium)",
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {quote.packSize ? `${quote.packSize} · ` : ""}
+                                  {quote.title}
+                                  {quote.inStock ? "" : " · out of stock"}
+                                </span>
+                                <span
+                                  data-testid={`choice-${canonicalItemId}-${quote.platform}-qty`}
+                                  style={{
+                                    display: "block",
+                                    fontSize: "0.78rem",
+                                    fontWeight: 600,
+                                    color: "var(--ion-color-primary)",
+                                  }}
+                                >
+                                  buy {packs} {quote.packSize ? `× ${quote.packSize}` : packs === 1 ? "pack" : "packs"}
+                                </span>
+                              </span>
+                              <span style={{ textAlign: "right", flexShrink: 0 }}>
+                                <span
+                                  style={{
+                                    display: "block",
+                                    fontWeight: 700,
+                                    color: "var(--ion-text-color)",
+                                  }}
+                                >
+                                  {formatRupees(quote.pricePaise)}
+                                </span>
+                                {perLabel ? (
+                                  <span
+                                    style={{
+                                      display: "block",
+                                      fontSize: "0.75rem",
+                                      color: "var(--ion-color-medium)",
+                                    }}
+                                  >
+                                    {perLabel}
+                                  </span>
+                                ) : null}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
 
             <AllocationCard
               allocation={allocation}

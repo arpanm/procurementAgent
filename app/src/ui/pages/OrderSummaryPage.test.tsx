@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { OrderAttempt } from "../../core/domain/types";
 import { OrderSummaryPage } from "./OrderSummaryPage";
 
@@ -61,5 +61,42 @@ describe("OrderSummaryPage", () => {
   it("handles the empty state", () => {
     render(<OrderSummaryPage attempts={[]} />);
     expect(screen.getByTestId("summary-empty")).toBeInTheDocument();
+  });
+
+  it("renders staged carts with a 'Review & checkout' hand-off button", () => {
+    const staged: OrderAttempt = {
+      platform: "amazon",
+      status: "cart_filled",
+      totalPaise: 9900,
+      paidOnCredit: false,
+      idempotencyKey: "amazon-stage",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:05.000Z",
+      cartUrl: "https://www.amazon.in/gp/cart/view.html",
+      stagedLineCount: 1,
+    };
+    const onOpenCart = vi.fn();
+    render(<OrderSummaryPage attempts={[staged]} onOpenCart={onOpenCart} />);
+
+    expect(screen.getByTestId("summary-headline")).toHaveTextContent("Your cart is ready");
+    expect(screen.getByTestId("staged-amazon")).toHaveTextContent("1 item added");
+
+    fireEvent.click(screen.getByTestId("review-amazon"));
+    expect(onOpenCart).toHaveBeenCalledWith("amazon");
+  });
+
+  it("disables the hand-off button when no cart URL is available", () => {
+    const staged: OrderAttempt = {
+      platform: "amazon",
+      status: "cart_filled",
+      totalPaise: 9900,
+      paidOnCredit: false,
+      idempotencyKey: "amazon-stage",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:05.000Z",
+      stagedLineCount: 0,
+    };
+    render(<OrderSummaryPage attempts={[staged]} />);
+    expect(screen.getByTestId("review-amazon")).toBeDisabled();
   });
 });

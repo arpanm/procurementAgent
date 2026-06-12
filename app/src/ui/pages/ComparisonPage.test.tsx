@@ -146,6 +146,52 @@ describe("ComparisonPage", () => {
     expect(approveSpy).not.toHaveBeenCalled();
   });
 
+  it("shows each platform's option per item with ₹/unit, and choosing re-optimizes", async () => {
+    const optimize = vi
+      .fn()
+      .mockResolvedValueOnce(allocation(39900))
+      .mockResolvedValueOnce(allocation(9900));
+    const orch = new Orchestrator(makeBackend(optimize as unknown as BackendClient["optimize"]), {
+      sessionId: "s1",
+      retryDelayMs: 0,
+    });
+    await orch.start(REQUEST);
+    // Same item on both platforms in different pack sizes (the real-world Milky Mist case).
+    orch.recordQuote({
+      platform: "hyperpure",
+      skuId: "hp-paneer",
+      canonicalItemId: "potato",
+      title: "Milky Mist Paneer 1 Kg",
+      pricePaise: 39900,
+      packSize: "1 Kg",
+      inStock: true,
+      readAt: "2026-01-01T00:00:00.000Z",
+    });
+    orch.recordQuote({
+      platform: "amazon",
+      skuId: "az-paneer",
+      canonicalItemId: "potato",
+      title: "Milky Mist Paneer 500 g",
+      pricePaise: 9900,
+      packSize: "500 g",
+      inStock: true,
+      readAt: "2026-01-01T00:00:00.000Z",
+    });
+    await orch.optimize();
+
+    render(<ComparisonPage orchestrator={orch} />);
+
+    // Both platform options are shown for the item, each with a per-unit price.
+    const hp = screen.getByTestId("choice-potato-hyperpure");
+    const az = screen.getByTestId("choice-potato-amazon");
+    expect(hp).toHaveTextContent("₹399/kg");
+    expect(az).toHaveTextContent("₹198/kg");
+
+    // Picking a platform issues a swap-platform modify (which re-optimizes).
+    fireEvent.click(az);
+    await waitFor(() => expect(optimize).toHaveBeenCalledTimes(2));
+  });
+
   it("read back invokes the injected speak fn with the explanation", async () => {
     const orch = await atApproval(async () => allocation(12300));
     const speak = vi.fn();

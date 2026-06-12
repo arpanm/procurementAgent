@@ -12,9 +12,10 @@
  * {@link modify}/{@link cancel} never place an order — they only reshape demand or stop the session.
  */
 import type { BackendClient } from "../backend/BackendClient";
-import type { Allocation, ProcurementRequest, Quote } from "../domain/types";
+import type { Allocation, PlatformId, ProcurementRequest, Quote } from "../domain/types";
 import type { DomainEvent } from "../automation/events";
 import { OptimizerClient, type PlatformConstraint } from "../optimizer/OptimizerClient";
+import { reconcileAllocation } from "../pricing/quantityReconcile";
 import { createStore, type ReadableStore, type Store } from "./store";
 import {
   apply,
@@ -114,16 +115,31 @@ export class Orchestrator implements ReadableStore<SessionState> {
   }
 
   /**
+   * Seed the default per-item platform picks (best ₹/unit) before optimizing. These are defaults only:
+   * a later user swap-platform edit overrides them. Call before {@link optimize} so the first
+   * allocation reflects best value rather than the backend's raw-pack-price ranking.
+   */
+  seedDefaultPins(pins: Readonly<Record<string, PlatformId>>): void {
+    if (Object.keys(pins).length > 0) {
+      this.dispatch({ type: "PinsSeeded", pins });
+    }
+  }
+
+  /**
    * Run the optimizer against the current demand + quotes and surface the result for approval.
    * Idempotent and resumable: it only reads state and emits events; calling it again re-solves.
    */
   async optimize(): Promise<Allocation> {
     this.dispatch({ type: "OptimizeStarted" });
     const { items, quotes, pins } = this.store.getState();
-    const allocation = await this.optimizer.optimize(items, quotes, {
+    const raw = await this.optimizer.optimize(items, quotes, {
       pins,
       constraints: this.constraints,
     });
+    // Reconcile each line's quantity to the chosen platform's pack size: "6 packets of 500 g" = 3 kg,
+    // so a 1 kg-pack platform needs 3 packs (not 6), a 500 g-pack platform needs 6. Rupee rollups are
+    // recomputed to match, so the comparison + staged cart both use the correct count.
+    const allocation = reconcileAllocation(raw, items, quotes);
     this.dispatch({ type: "Optimized", allocation });
     this.dispatch({ type: "ApprovalRequested" });
     return allocation;
@@ -146,6 +162,14 @@ export class Orchestrator implements ReadableStore<SessionState> {
   /** Cancel the session. Never places an order. */
   cancel(): void {
     this.dispatch({ type: "Cancelled" });
+  }
+
+  /**
+   * Mark a cart hand-off run complete (all platforms staged). Moves the session to `done` so the
+   * summary renders. Used by the stage-cart checkout mode, which never emits `OrderPlaced`.
+   */
+  finishCheckout(): void {
+    this.dispatch({ type: "CheckoutFinished" });
   }
 
   /** Fold an automation-layer domain event (OTP/payment/placed/failed) into the session. */

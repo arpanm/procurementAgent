@@ -169,6 +169,71 @@ describe("WebViewAutomationEngine with MockBridge", () => {
     }
   });
 
+  it("adds via the server-side cart-add URL when one is configured (no detail-page click)", async () => {
+    // The detail page has an add button, but with a cart-add URL configured the engine must NOT click it
+    // (Amazon's mobile add handler is dead); it navigates to the server-side endpoint instead.
+    document.body.innerHTML = `
+      <button id="add">Add to cart</button>
+    `;
+    let clicked = 0;
+    document.getElementById("add")!.addEventListener("click", () => {
+      clicked++;
+    });
+
+    const bridge = new MockBridge({ doc: document });
+    const built: { url: string; qty: number }[] = [];
+    const engine = new WebViewAutomationEngine({
+      platform: "amazon",
+      bridge,
+      backend: makeBackend(),
+      playbooks: buildPlaybooks({ platform: "amazon", displayName: "Amazon" }),
+      cartAddUrl: (url, qty) => {
+        built.push({ url, qty });
+        return `https://www.amazon.in/gp/aws/cart/add.html?ASIN.1=B018E0LQ8W&Quantity.1=${qty}`;
+      },
+    });
+    const events: DomainEvent[] = [];
+    engine.on((e) => events.push(e));
+
+    await engine.addToCart("milky-mist-paneer-500-g", 5);
+
+    // It navigated to the cart-add endpoint with the requested quantity…
+    expect(bridge.opened.some((o) => o.url.includes("cart/add.html") && o.url.includes("Quantity.1=5"))).toBe(true);
+    expect(built[0]?.qty).toBe(5);
+    // …and never clicked the (corrupted) detail-page add button.
+    expect(clicked).toBe(0);
+    const added = events.find((e) => e.type === "ItemAddedToCart");
+    expect(added && added.type === "ItemAddedToCart" ? added.qty : -1).toBe(5);
+  });
+
+  it("falls back to clicking when the cart-add URL builder returns null (no ASIN)", async () => {
+    document.body.innerHTML = `
+      <button id="add">Add to cart</button>
+      <a id="cart" href="/cart">Cart (0)</a>
+    `;
+    const cart = document.getElementById("cart")!;
+    let count = 0;
+    document.getElementById("add")!.addEventListener("click", () => {
+      count++;
+      cart.textContent = `Cart (${count})`;
+    });
+    const clickAddViaClaude: BackendClient["nextAction"] = async ({ observation }) => {
+      const btn = observation.elements.find((e) => /add to cart/i.test(e.name));
+      return btn ? { type: "click", idx: btn.idx } : { type: "fail", reason: "no add button" };
+    };
+    const engine = new WebViewAutomationEngine({
+      platform: "amazon",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({ nextAction: clickAddViaClaude }),
+      playbooks: buildPlaybooks({ platform: "amazon", displayName: "Amazon" }),
+      cartAddUrl: () => null, // builder can't resolve an ASIN → engine must click the button instead
+    });
+
+    await engine.addToCart("some-sku", 1);
+
+    expect(count).toBe(1); // clicked the add button as a fallback
+  });
+
   it("clearCart removes pre-existing items until the cart reads empty", async () => {
     document.body.innerHTML = `
       <div id="rowA">

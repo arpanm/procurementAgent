@@ -193,6 +193,75 @@ function numOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+/** One candidate control surfaced by the debug checkout probe (quantity selector / add-to-cart / stepper). */
+export interface CheckoutProbeCandidate {
+  readonly group: "quantity" | "addToCart" | "stepper";
+  readonly tag: string;
+  readonly id: string;
+  readonly cls: string;
+  readonly nameAttr: string;
+  readonly type: string;
+  readonly value: string;
+  readonly text: string;
+  readonly aria: string;
+  readonly idx: string;
+}
+
+/**
+ * Debug-only probe that dumps the REAL identifiers (id / class / name / type) of a checkout page's
+ * quantity selector, add-to-cart button/form, and +/- steppers — the exact attributes the lean
+ * perceiver omits to stay small. This is what lets us wire a precise, re-injection-safe `findQuantitySelector`
+ * / `findAddToCart` against Amazon's actual mobile DOM instead of guessing. Runs only when automation
+ * debug is on, and only on the real Capgo bridge (never in tests / MockBridge).
+ */
+export function buildCheckoutProbeScript(requestId: string): string {
+  const meta = encodeScriptMeta({ kind: "dom", requestId });
+  return `${meta}
+(function () {
+  ${bridgeEmitFnSource()}
+  var RID = ${JSON.stringify(requestId)};
+  function pick(group, list) {
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (!el || !el.tagName) continue;
+      out.push({
+        group: group,
+        tag: el.tagName.toLowerCase(),
+        id: (el.id || '').slice(0, 60),
+        cls: (typeof el.className === 'string' ? el.className : '').slice(0, 140),
+        nameAttr: (el.getAttribute && el.getAttribute('name') || '').slice(0, 60),
+        type: (el.type || el.getAttribute && el.getAttribute('type') || '').slice(0, 30),
+        value: (typeof el.value === 'string' ? el.value : '').slice(0, 30),
+        text: ((el.innerText || el.textContent || '').trim()).slice(0, 60),
+        aria: (el.getAttribute && el.getAttribute('aria-label') || '').slice(0, 60),
+        idx: (el.getAttribute && el.getAttribute('data-pc-idx') || '')
+      });
+    }
+    return out;
+  }
+  function q(sel) { try { return Array.prototype.slice.call(document.querySelectorAll(sel)); } catch (e) { return []; } }
+  var quantity = q('select, [id*="quant" i], [name*="quant" i], [id*="qty" i], [name*="qty" i], [aria-label*="quantity" i], [class*="quantity" i]');
+  var addToCart = q('#add-to-cart-button, [name="submit.add-to-cart"], [name*="submit.add" i], input[name*="add-to-cart" i], button[id*="cart" i], form[id*="cart" i], form[action*="cart" i], [data-action*="cart" i]');
+  // Steppers: buttons whose visible text / label is a bare + or - (qty increment on mobile tiles).
+  var stepper = q('button, [role="button"], a').filter(function (el) {
+    var t = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();
+    return /^[\\-+\\u2212\\u2013]$/.test(t.replace(/\\s/g, '')) || /\\b(increase|decrease)\\b/i.test(t);
+  });
+  // Also any element whose visible text looks like "Add to cart" / "Add to basket".
+  var addText = q('button, input, a, [role="button"]').filter(function (el) {
+    var t = (el.innerText || el.textContent || el.value || '').trim();
+    return /add to (cart|basket)/i.test(t);
+  });
+  var all = pick('quantity', quantity)
+    .concat(pick('addToCart', addToCart))
+    .concat(pick('addToCart', addText))
+    .concat(pick('stepper', stepper))
+    .slice(0, 40);
+  __hpEmit(RID, { requestId: RID, type: 'diag', candidates: all });
+})();`;
+}
+
 /**
  * The injectable, self-contained perceiver string. Mirrors `serializeDom` but runs in the live
  * webview and posts the result back over the Capgo bridge (§3.5.4). It is never executed in tests

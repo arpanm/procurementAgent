@@ -93,11 +93,13 @@ export type OrchestratorEvent =
   | { readonly type: "SessionStarted"; readonly request: ProcurementRequest }
   | { readonly type: "PlanReady"; readonly items: readonly RequestedItem[] }
   | { readonly type: "QuoteCollected"; readonly quote: Quote }
+  | { readonly type: "PinsSeeded"; readonly pins: Readonly<Record<string, PlatformId>> }
   | { readonly type: "OptimizeStarted" }
   | { readonly type: "Optimized"; readonly allocation: Allocation }
   | { readonly type: "ApprovalRequested" }
   | { readonly type: "Approved" }
   | { readonly type: "ModifyRequested"; readonly change: ModifyChange }
+  | { readonly type: "CheckoutFinished" }
   | { readonly type: "Cancelled" };
 
 export type SessionEvent = OrchestratorEvent | DomainEvent;
@@ -218,6 +220,21 @@ function reduce(state: SessionState, event: SessionEvent): SessionState {
     case "QuoteRead":
       return { ...state, quotes: upsertQuote(state.quotes, event.quote) };
 
+    // Seed default per-item platform picks (best ₹/unit) before the first optimize. Merges into pins
+    // WITHOUT changing status (it's a default, not a user edit); user swap-platform edits still win
+    // because they arrive later. Only meaningful before approval.
+    case "PinsSeeded": {
+      if (state.approved || TERMINAL.has(state.status)) {
+        return state;
+      }
+      const pins = { ...event.pins, ...state.pins };
+      // No-op (preserve reference) when nothing actually changes, so the store skips a notify.
+      const sameKeys = Object.keys(pins).length === Object.keys(state.pins).length;
+      const unchanged =
+        sameKeys && Object.entries(pins).every(([k, v]) => state.pins[k] === v);
+      return unchanged ? state : { ...state, pins };
+    }
+
     case "OptimizeStarted":
       if (TERMINAL.has(state.status) || state.status === "idle") {
         return state;
@@ -251,6 +268,15 @@ function reduce(state: SessionState, event: SessionEvent): SessionState {
       const { items, pins } = applyModify(state, event.change);
       return { ...state, status: "modifying", items, pins, approved: false };
     }
+
+    // Cart hand-off complete: all platforms staged (best-effort add-to-cart). There is no order
+    // placement in this mode — the user finishes checkout manually — so this is the terminal success
+    // for a staged run. Only reachable after approval.
+    case "CheckoutFinished":
+      if (!state.approved || TERMINAL.has(state.status)) {
+        return state;
+      }
+      return { ...state, status: "done" };
 
     case "Cancelled":
       if (TERMINAL.has(state.status)) {

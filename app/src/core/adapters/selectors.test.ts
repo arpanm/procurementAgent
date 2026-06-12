@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SerializedElement } from "../automation/AutomationEngine";
 import {
+  asinFromUrl,
   cleanTitle,
   detectCredit,
   detectOtp,
@@ -247,6 +248,24 @@ describe("title & sku derivation", () => {
     expect(fromCard).toBe("B078KT9RB1");
     expect(fromCart).toBe("B078KT9RB1");
     expect(fromCard).toBe(fromCart);
+  });
+});
+
+describe("asinFromUrl", () => {
+  it("pulls the ASIN out of a full product URL (for the server-side cart-add endpoint)", () => {
+    expect(
+      asinFromUrl(
+        "https://www.amazon.in/Milky-Mist-Paneer-500g-Pack/dp/B018E0LQ8W/ref=mp_s_a_1_3?dib=x&qid=1",
+      ),
+    ).toBe("B018E0LQ8W");
+    expect(asinFromUrl("https://www.amazon.in/gp/product/B078KT9RB1")).toBe("B078KT9RB1");
+  });
+
+  it("returns undefined when no ASIN is present, so the caller can fall back to clicking", () => {
+    expect(asinFromUrl("https://www.amazon.in/s?k=paneer")).toBeUndefined();
+    expect(asinFromUrl("https://www.amazon.in/")).toBeUndefined();
+    expect(asinFromUrl(undefined)).toBeUndefined();
+    expect(asinFromUrl(null)).toBeUndefined();
   });
 });
 

@@ -22,11 +22,11 @@ import type { AutomationEngine } from "../../core/automation/AutomationEngine";
 import { MockAutomationEngine } from "../../core/automation/__mocks__/MockAutomationEngine";
 import { createEngine } from "../../core/adapters";
 import { CheckoutDriver } from "../../core/checkout/CheckoutDriver";
-import { VerifierClient } from "../../core/checkout/VerifierClient";
+import { defaultPlatformPins } from "../../core/optimizer/defaultSelection";
 import { AuditLog } from "../../core/audit/AuditLog";
 import { InMemorySecureStore } from "../../core/secure/SecureStore";
 import type { DomainEvent } from "../../core/automation/events";
-import { BACKEND_BASE_URLS, PLATFORM_URLS } from "../../core/config";
+import { BACKEND_BASE_URLS, PLATFORM_CART_URLS, PLATFORM_URLS } from "../../core/config";
 import { isAutomationDebug, traceAutomation } from "../../core/debug/automationDebug";
 import { useSyncExternalStore } from "react";
 import { ChatPage } from "./ChatPage";
@@ -370,6 +370,9 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
       );
 
       setBusyMessage("Finding the cheapest split…");
+      // Default each item to the best VALUE (lowest ₹/kg·L·piece) across platforms, so a 1 Kg pack
+      // isn't beaten by a "cheaper-looking" 500 g pack. The user can still switch per item.
+      orchestrator.seedDefaultPins(defaultPlatformPins(orchestrator.getState().quotes));
       await orchestrator.optimize();
       traceAutomation("think", "optimization complete");
       setBusyMessage(null);
@@ -427,28 +430,69 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         items: orchestrator.getState().items,
         productUrls,
         showWebView,
-        // Allow a small per-unit drift between the priced read and the cart (B2B prices wobble by a
-        // rupee or two; vision reads round). Still blocks real mismatches, wrong SKUs and wrong qty.
-        verifier: new VerifierClient(backend, { tolerancePaise: 500 }),
+        cartUrl: PLATFORM_CART_URLS[platformAllocation.platform],
       });
+      const platform = platformAllocation.platform;
       try {
-        const attempt = await driver.run(platformAllocation);
+        traceAutomation("think", "▶ staging cart (best-effort add-to-cart, hand off for checkout)", platform);
+        // Cart hand-off mode: drop the approved lines into the cart, then let the user review + pay.
+        // No cart-clearing (we never delete the user's existing items), no OTP/payment automation.
+        const attempt = await driver.stageCart(platformAllocation);
         collected.push(attempt);
-      } catch {
-        // The driver already emitted StepFailed; keep going with other platforms.
+        traceAutomation(
+          "info",
+          `cart staged → ${attempt.stagedLineCount ?? 0}/${platformAllocation.lines.length} line(s) added`,
+          platform,
+        );
+      } catch (err) {
+        traceAutomation(
+          "error",
+          `staging threw: ${err instanceof Error ? err.message : String(err)}`,
+          platform,
+        );
       } finally {
-        // Dismiss the platform's WebView once checkout finishes (success or failure) so we "come out"
-        // of the browser instead of leaving the cart page hanging on screen.
+        // Dismiss the staging WebView so we "come out" of the browser; the user re-opens the cart on
+        // demand from the summary (which reloads it logged-in for manual review + checkout).
+        traceAutomation("think", "closing webview", platform);
         try {
           await engine.close();
-        } catch {
-          /* best-effort */
+          traceAutomation("info", "webview closed", platform);
+        } catch (err) {
+          traceAutomation(
+            "warn",
+            `webview close failed: ${err instanceof Error ? err.message : String(err)}`,
+            platform,
+          );
         }
       }
     }
     setAttempts(collected);
     setPendingHitl(null);
+    // Staging emits no OrderPlaced, so explicitly move the session to its terminal success state and
+    // render the summary (with the per-platform "Review & checkout" hand-off).
+    orchestrator.finishCheckout();
   }, [audit, backend, engineFor, orchestrator]);
+
+  // Hand-off: bring the platform's cart to the foreground (logged-in session) so the user can review
+  // quantities/variants and complete checkout manually. Re-opens the cart URL fresh and shows it.
+  const openCartForReview = useCallback(
+    async (platform: PlatformId): Promise<void> => {
+      const url = PLATFORM_CART_URLS[platform];
+      try {
+        const engine = engineFor(platform);
+        traceAutomation("think", `opening cart for manual checkout: ${url}`, platform);
+        await engine.open(url, { hidden: false });
+        await engine.show();
+      } catch (err) {
+        traceAutomation(
+          "warn",
+          `could not open cart: ${err instanceof Error ? err.message : String(err)}`,
+          platform,
+        );
+      }
+    },
+    [engineFor],
+  );
 
   useEffect(() => {
     if (state.status === "approved" && !checkoutStartedRef.current) {
@@ -523,7 +567,12 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         <Busy message="Filling your carts — we'll pause for OTP/payment." title="Placing your orders" />
       );
     case "done":
-      return <OrderSummaryPage attempts={attempts} />;
+      return (
+        <OrderSummaryPage
+          attempts={attempts}
+          onOpenCart={(platform) => void openCartForReview(platform)}
+        />
+      );
     case "failed":
       return <FailedState message={state.error ?? "Something went wrong. Please try again."} />;
     case "cancelled":

@@ -60,6 +60,12 @@ export interface CheckoutDriverDeps {
   readonly productUrls?: ReadonlyMap<string, string>;
   /** Keep the webview visible during cart-fill (debug). Defaults to hidden automation. */
   readonly showWebView?: boolean;
+  /**
+   * The platform's cart URL, surfaced to the user for manual review + checkout after {@link stageCart}
+   * stages the items. When set, the staged {@link OrderAttempt} carries it so the summary can offer a
+   * "Review & checkout on {platform}" hand-off.
+   */
+  readonly cartUrl?: string;
   /** Sink for domain events; wire `orchestrator.ingest` to fold them into the session. */
   readonly onEvent?: DomainEventListener;
   /** Override the verifier (e.g. with a price tolerance); defaults to one wrapping `backend`. */
@@ -81,6 +87,7 @@ export class CheckoutDriver {
   private readonly itemsById: ReadonlyMap<string, RequestedItem>;
   private readonly productUrls: ReadonlyMap<string, string>;
   private readonly showWebView: boolean;
+  private readonly cartUrl?: string;
   private readonly onEvent?: DomainEventListener;
   private readonly verifier: VerifierClient;
   private readonly idempotency: IdempotencyStore;
@@ -95,6 +102,7 @@ export class CheckoutDriver {
     );
     this.productUrls = deps.productUrls ?? new Map();
     this.showWebView = deps.showWebView ?? false;
+    this.cartUrl = deps.cartUrl;
     this.onEvent = deps.onEvent;
     this.verifier = deps.verifier ?? new VerifierClient(deps.backend);
     this.idempotency =
@@ -278,6 +286,79 @@ export class CheckoutDriver {
       this.emit({ type: "StepFailed", platform, step: "checkout", reason });
       return this.failedAttempt(platform, allocation, idempotencyKey, startedAt);
     }
+  }
+
+  /**
+   * Stage-only checkout (cart hand-off mode). Best-effort adds each approved line to the platform's
+   * cart, then STOPS — no cart-clearing (we never touch the user's pre-existing items), no Verifier,
+   * no OTP/payment automation, no order placement. The returned attempt carries the platform cart URL
+   * so the summary can hand the user a "Review & checkout on {platform}" button to finish manually.
+   *
+   * This deliberately trades full automation (fragile on Amazon's cart) for a reliable, low-surprise
+   * flow: the agent finds the product and drops it in your cart; you review quantity/variant and pay.
+   */
+  async stageCart(allocation: PlatformAllocation): Promise<OrderAttempt> {
+    const platform = allocation.platform;
+    const startedAt = this.now();
+    const idempotencyKey = newIdempotencyKey(platform, allocation);
+
+    await this.audit.append({
+      actor: "agent",
+      action: "cart:stage-start",
+      after: { platform, lines: allocation.lines.length, idempotencyKey },
+      at: startedAt,
+    });
+
+    let added = 0;
+    for (const line of allocation.lines) {
+      try {
+        const productUrl = this.productUrls.get(line.canonicalItemId);
+        if (productUrl) {
+          await this.engine.open(productUrl, { hidden: !this.showWebView });
+        } else {
+          const item = this.itemsById.get(line.canonicalItemId);
+          if (item) await this.engine.search(item);
+        }
+        await this.engine.addToCart(line.skuId, line.qty);
+        added += 1;
+        await this.audit.append({
+          actor: "agent",
+          action: "cart:add",
+          after: { platform, skuId: line.skuId, qty: line.qty, via: productUrl ? "product-url" : "search" },
+          at: this.now(),
+        });
+      } catch (addErr) {
+        await this.audit.append({
+          actor: "agent",
+          action: "cart:add-failed",
+          after: {
+            platform,
+            skuId: line.skuId,
+            reason: addErr instanceof Error ? addErr.message : String(addErr),
+          },
+          at: this.now(),
+        });
+      }
+    }
+
+    await this.audit.append({
+      actor: "agent",
+      action: "cart:staged",
+      after: { platform, added, total: allocation.lines.length, cartUrl: this.cartUrl },
+      at: this.now(),
+    });
+
+    return {
+      platform,
+      status: "cart_filled",
+      totalPaise: allocation.totalPaise,
+      paidOnCredit: false,
+      idempotencyKey,
+      startedAt,
+      updatedAt: this.now(),
+      cartUrl: this.cartUrl,
+      stagedLineCount: added,
+    };
   }
 
   /**

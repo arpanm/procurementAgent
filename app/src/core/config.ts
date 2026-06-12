@@ -32,3 +32,13 @@ export const PLATFORM_URLS: Record<PlatformId, string> = {
   hyperpure: "https://www.hyperpure.com",
   amazon: "https://www.amazon.in",
 };
+
+/**
+ * Each platform's cart URL. After the agent stages items (best-effort add-to-cart), checkout is handed
+ * off to the user: the summary offers a "Review & checkout on {platform}" button that re-opens this
+ * URL in the foreground (the logged-in WebView session) so the user can adjust and complete the order.
+ */
+export const PLATFORM_CART_URLS: Record<PlatformId, string> = {
+  hyperpure: "https://www.hyperpure.com/in/cart",
+  amazon: "https://www.amazon.in/gp/cart/view.html",
+};

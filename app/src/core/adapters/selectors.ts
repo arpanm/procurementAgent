@@ -348,6 +348,18 @@ export function parseMovPaise(text: string): number | undefined {
 /** Amazon's stable product id (ASIN) lives right after `/dp/`, `/gp/product/`, etc. */
 const ASIN_RE = /\/(?:dp|gp\/product|gp\/aw\/d|gp\/offer-listing)\/([A-Z0-9]{10})(?:[/?]|$)/i;
 
+/**
+ * Extract an Amazon ASIN from a full product URL (or any href that carries one). Returns the upper-cased
+ * 10-char id, or undefined when none is present. Used to drive Amazon's server-side cart-add endpoint
+ * (`/gp/aws/cart/add.html?ASIN.1=…`), which adds a known quantity reliably — unlike the detail page's
+ * client-side "Add to cart" button, whose handler our script re-injection corrupts.
+ */
+export function asinFromUrl(url: string | null | undefined): string | undefined {
+  if (!url) return undefined;
+  const m = ASIN_RE.exec(url);
+  return m ? m[1].toUpperCase() : undefined;
+}
+
 /** Derive a stable SKU id from a product href; falls back to a slug of the title. */
 export function skuIdFromHref(href: string | null | undefined, fallbackTitle: string): string {
   if (href) {

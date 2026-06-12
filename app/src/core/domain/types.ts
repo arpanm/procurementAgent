@@ -75,6 +75,11 @@ export interface Quote {
   readonly pricePaise: number;
   /** MRP in paise, if shown. */
   readonly mrpPaise?: number;
+  /**
+   * The pack size as listed by the platform, e.g. "1 Kg", "500 g", "750 ml". Parsed from the product
+   * title so the comparison UI can show ₹/kg (or /L, /piece) and pick the best value across sizes.
+   */
+  readonly packSize?: string;
   readonly inStock: boolean;
   /** Absolute product detail-page URL, so checkout can re-open the exact product to add it to cart. */
   readonly productUrl?: string;
@@ -152,6 +157,14 @@ export interface OrderAttempt {
   readonly idempotencyKey: string;
   readonly startedAt: string;
   readonly updatedAt: string;
+  /**
+   * The platform's cart URL to hand off to the user for manual review + checkout. Set when the agent
+   * only stages the cart (best-effort add-to-cart) instead of fully placing the order, so the summary
+   * can offer a "Review & checkout on {platform}" button that re-opens the cart in the foreground.
+   */
+  readonly cartUrl?: string;
+  /** Number of approved lines we attempted to add to this platform's cart (for the summary copy). */
+  readonly stagedLineCount?: number;
 }
 
 /** Helper to format paise as a ₹ string for narration/UX. */

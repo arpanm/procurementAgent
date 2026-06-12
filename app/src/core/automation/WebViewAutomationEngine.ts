@@ -25,7 +25,13 @@ import type {
 } from "./AutomationEngine";
 import type { DomainEvent, DomainEventListener } from "./events";
 import type { InAppBrowserBridge } from "./bridge";
-import { buildSerializerScript } from "./injected/domSerializer";
+import {
+  buildSerializerScript,
+  buildCheckoutProbeScript,
+  type CheckoutProbeCandidate,
+} from "./injected/domSerializer";
+import { searchQueryFor } from "../adapters/playbooks/common";
+import { parsePackSize } from "../pricing/packPricing";
 import { buildSettleScript } from "./injected/settleWaiter";
 import { buildActionScript } from "./injected/actionExecutor";
 import {
@@ -73,6 +79,8 @@ export interface QuoteDraft {
   readonly title: string;
   readonly pricePaise: number;
   readonly mrpPaise?: number;
+  /** Explicit pack size (e.g. "1 Kg") when extraction knows it; else parsed from the title. */
+  readonly packSize?: string;
   readonly inStock: boolean;
   /** Product detail-page URL (relative or absolute) the engine absolutises onto the Quote. */
   readonly productUrl?: string;
@@ -132,6 +140,16 @@ export interface WebViewAutomationEngineOptions {
    * webview is parked on the last product page. When unset, `getCart` reads whatever page is open.
    */
   readonly cartUrl?: string;
+  /**
+   * Build a server-side "add to cart" URL from the CURRENT product-page URL + quantity, or return null
+   * when it can't (so the engine falls back to clicking the page button). When set (Amazon), `addToCart`
+   * navigates to it instead of clicking the page's add button — Amazon's mobile detail page double-loads
+   * its own JS (`AUIDefineJS already present`, `sp.load.js already registered`), which kills the
+   * client-side add handler so the click does nothing. The cart-add endpoint adds the exact quantity in
+   * one server round-trip, honouring the logged-in session. Keeping the (Amazon-specific) ASIN parsing in
+   * the builder leaves the engine platform-agnostic.
+   */
+  readonly cartAddUrl?: (currentUrl: string, qty: number) => string | null;
   /** Base backoff in ms; the nth retry waits base * 2^n. Default 200. */
   readonly baseBackoffMs?: number;
   /** Clock for `readAt`/timestamps. */
@@ -213,6 +231,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
   private readonly cartLoadMs: number;
   private readonly visionFallback: boolean;
   private readonly cartUrl?: string;
+  private readonly cartAddUrl?: (currentUrl: string, qty: number) => string | null;
   private readonly baseBackoffMs: number;
   private readonly now: () => string;
   private readonly otpUrlPatterns: readonly RegExp[];
@@ -241,6 +260,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
     this.cartLoadMs = opts.cartLoadMs ?? 0;
     this.visionFallback = opts.visionFallback ?? false;
     this.cartUrl = opts.cartUrl;
+    this.cartAddUrl = opts.cartAddUrl;
     this.baseBackoffMs = opts.baseBackoffMs ?? 200;
     this.now = opts.now ?? (() => new Date().toISOString());
     this.otpUrlPatterns = opts.otpUrlPatterns ?? DEFAULT_OTP_URL_PATTERNS;
@@ -279,6 +299,13 @@ export class WebViewAutomationEngine implements AutomationEngine {
   // --- public engine API -----------------------------------------------------
 
   async search(item: RequestedItem): Promise<void> {
+    // Echo the FULL parsed item (not just name) so a wrong search query ("milky" instead of "paneer")
+    // can be pinned to the intent parse vs. the query builder, straight from the on-device debug log.
+    this.trace(
+      "info",
+      `search item: name="${item.name}" brand="${item.brand ?? ""}" variant="${item.variant ?? ""}"` +
+        ` packSize="${item.packSize ?? ""}" qty=${item.qty} → query "${searchQueryFor(item)}"`,
+    );
     await this.runLoop({
       stepName: "search",
       task: `search for "${item.name}"`,
@@ -312,6 +339,16 @@ export class WebViewAutomationEngine implements AutomationEngine {
   }
 
   async addToCart(skuId: string, qty: number): Promise<void> {
+    // Debug-only: dump the REAL quantity/add-to-cart/stepper identifiers on this product page so we can
+    // wire precise selectors against the site's actual DOM (the lean perceiver drops id/class).
+    await this.traceCheckoutProbe();
+
+    // Preferred path (Amazon): add via the server-side cart-add endpoint instead of the detail page's
+    // "Add to cart" button, whose handler is dead because the mobile page double-loads its own JS. This
+    // adds the EXACT quantity in one navigation and honours the logged-in session. The Verifier re-reads
+    // the real cart afterwards, so a failed/blocked add (out-of-stock, 3P seller) is still caught.
+    if (this.cartAddUrl && (await this.addViaCartUrl(skuId, qty))) return;
+
     // Prefer setting the product-page quantity selector to the full count in one shot (Amazon's
     // `<select name="quantity">`). One "Add to cart" then adds all N at once — reliable even when the
     // cart badge is hidden. Platforms with only a +/- stepper have no selector, so this is a no-op and
@@ -374,6 +411,34 @@ export class WebViewAutomationEngine implements AutomationEngine {
     });
   }
 
+  /**
+   * Amazon-only fast path: add the item via the server-side cart-add endpoint built from the current
+   * product URL (e.g. `/gp/aws/cart/add.html?ASIN.1=<ASIN>&Quantity.1=<qty>`). Returns true when it
+   * navigated there (the add was attempted server-side), false when no URL could be built (no ASIN on the
+   * current page) so the caller falls back to clicking. After navigating, some locales show a tiny
+   * confirmation page with a final "Add to cart" button — we click it if present. Verification still
+   * happens later in `getCart`, so this never *asserts* success, it just uses the reliable mechanism.
+   */
+  private async addViaCartUrl(skuId: string, qty: number): Promise<boolean> {
+    if (!this.cartAddUrl) return false;
+    // Capture the current product URL (the detail page CheckoutDriver just opened).
+    const here = (await this.perceive()).url || this.lastUrl;
+    const url = this.cartAddUrl(here, qty);
+    if (!url) {
+      this.trace("warn", `addToCart "${skuId}": no cart-add URL for ${here || "(unknown)"} — using button`);
+      return false;
+    }
+    this.trace("think", `addToCart "${skuId}" → cart-add URL (qty ${qty})`);
+    await this.open(url, { hidden: this.hidden });
+    // The endpoint adds the item server-side and lands on the cart; perceive once so `lastUrl`/state are
+    // current, but do NOT click anything (avoids deferring to Claude on a page with no add button). The
+    // Verifier re-reads the real cart next, which is the source of truth for whether the add stuck.
+    await this.perceive();
+    this.trace("info", `addToCart "${skuId}" → added via cart-add URL (qty ${qty}); Verifier will confirm`);
+    this.emit({ type: "ItemAddedToCart", platform: this.platform, skuId, qty, cartCount: qty });
+    return true;
+  }
+
   async getCart(): Promise<CartSnapshot> {
     // The cart is read on a dedicated cart page; after add-to-cart the webview is parked on the last
     // product page, so navigate to the cart first (preserving the current shown/hidden state).
@@ -389,6 +454,9 @@ export class WebViewAutomationEngine implements AutomationEngine {
     const obs = await this.awaitCartLoaded();
     const cart = this.cartReader(obs, this.platform);
     this.traceCartDiag(obs, cart);
+    // Also dump the cart page's quantity/remove controls — the cart-page stepper is our fallback for
+    // setting quantity when the product page has no native selector.
+    await this.traceCheckoutProbe();
     return cart;
   }
 
@@ -435,8 +503,14 @@ export class WebViewAutomationEngine implements AutomationEngine {
         return;
       }
     }
-    let prev = Number.POSITIVE_INFINITY;
-    for (let round = 0; round < 20; round++) {
+    // Track the FEWEST lines we've seen and a stall counter rather than breaking the instant a round
+    // doesn't strictly improve: deleting a line makes Amazon reload the cart, and the immediately-next
+    // read can transiently show the same (or more) lines mid-render. Breaking on the first non-decrease
+    // is what made clearCart give up after removing a single item. We keep going until the cart is empty,
+    // no progress is made for several consecutive rounds, or we hit the hard round cap.
+    let best = Number.POSITIVE_INFINITY;
+    let stalled = 0;
+    for (let round = 0; round < 24; round++) {
       // Wait for the cart body to render: perceiving the bare shell reads 0 lines and would make us
       // declare the cart "emptied" while the old items are still there (exactly the bug seen in the
       // field — clearCart logged "emptied" then the cart still held a bag + a book).
@@ -452,9 +526,16 @@ export class WebViewAutomationEngine implements AutomationEngine {
         }
         return;
       }
-      // No fewer lines than last round → the remove control isn't advancing; stop rather than loop.
-      if (remaining >= prev) break;
-      prev = remaining;
+      if (remaining < best) {
+        best = remaining;
+        stalled = 0;
+      } else {
+        stalled++;
+      }
+      if (stalled >= 3) {
+        this.trace("warn", `clearCart: ${remaining} item(s) left but no progress for 3 rounds — stopping`);
+        break;
+      }
       const result = await this.runLoop({
         stepName: "clearCart",
         task: "remove one item from the cart",
@@ -462,7 +543,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
       });
       if (result.kind === "hitl") return;
     }
-    this.trace("info", "clearCart → done");
+    this.trace("info", `clearCart → done (${best === Number.POSITIVE_INFINITY ? "?" : best} item(s) last seen)`);
   }
 
   async checkout(): Promise<CheckoutOutcome> {
@@ -913,6 +994,9 @@ export class WebViewAutomationEngine implements AutomationEngine {
       title: draft.title,
       pricePaise: draft.pricePaise,
       mrpPaise: draft.mrpPaise,
+      // Pack size drives the ₹/kg comparison + the default platform pick. Prefer an explicit value
+      // from extraction; otherwise parse it out of the product title ("Milky Mist Paneer, 1 Kg").
+      packSize: draft.packSize ?? parsePackSize(draft.title)?.raw,
       inStock: draft.inStock,
       productUrl: this.absoluteUrl(draft.productUrl),
       stockCap: draft.stockCap,
@@ -995,6 +1079,34 @@ export class WebViewAutomationEngine implements AutomationEngine {
    * product-link rows on the page, so a verify "missing SKU" can be debugged against the REAL cart DOM
    * (the reader is heuristic; this trace is how we tune its selectors without guessing).
    */
+  /**
+   * Debug-only: run the checkout probe and log each candidate's real identifiers (id / class / name /
+   * type / text). This is the evidence we need to build a robust `findQuantitySelector` / `findAddToCart`
+   * for Amazon's mobile detail page (where there is no native `<select name="quantity">` and our script
+   * re-injection corrupts the styled add-to-cart handler). Best-effort: never throws into the add flow.
+   */
+  private async traceCheckoutProbe(): Promise<void> {
+    if (!isAutomationDebug()) return;
+    try {
+      const detail = await this.bridge.call(this.webviewId, (rid) =>
+        buildCheckoutProbeScript(rid),
+      );
+      const candidates = Array.isArray((detail as { candidates?: unknown }).candidates)
+        ? ((detail as { candidates: CheckoutProbeCandidate[] }).candidates)
+        : [];
+      this.trace("info", `checkout-probe: ${candidates.length} candidate control(s)`);
+      for (const c of candidates) {
+        this.trace(
+          "info",
+          `  [${c.group}] <${c.tag}> id="${c.id}" name="${c.nameAttr}" type="${c.type}"` +
+            ` val="${c.value}" idx=${c.idx || "-"} aria="${c.aria}" cls="${c.cls.slice(0, 70)}" text="${c.text}"`,
+        );
+      }
+    } catch (e) {
+      this.trace("warn", `checkout-probe failed: ${String(e)}`);
+    }
+  }
+
   private traceCartDiag(obs: Observation, cart: CartSnapshot): void {
     if (!isAutomationDebug()) return;
     this.trace(

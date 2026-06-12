@@ -142,6 +142,41 @@ describe("session reducer", () => {
     expect(approved.approved).toBe(true);
   });
 
+  it("PinsSeeded sets default platform picks without changing status", () => {
+    let s = apply(initialState("s1"), { type: "SessionStarted", request: REQUEST });
+    s = apply(s, { type: "PlanReady", items: ITEMS });
+    const before = s.status;
+    s = apply(s, { type: "PinsSeeded", pins: { potato: "amazon", "refined oil": "hyperpure" } });
+    expect(s.status).toBe(before); // seeding a default is not a state transition
+    expect(s.pins).toEqual({ potato: "amazon", "refined oil": "hyperpure" });
+  });
+
+  it("PinsSeeded never overrides an explicit user swap-platform pin", () => {
+    let s = hydrate("s1", logToApproval());
+    // User explicitly pins potato to amazon...
+    s = apply(s, {
+      type: "ModifyRequested",
+      change: { kind: "swap-platform", canonicalItemId: "potato", itemName: "potato", platform: "amazon" },
+    });
+    // ...then a (late) default seed tries to set potato → hyperpure. User pin must win.
+    s = apply(s, { type: "PinsSeeded", pins: { potato: "hyperpure", "refined oil": "amazon" } });
+    expect(s.pins.potato).toBe("amazon");
+    expect(s.pins["refined oil"]).toBe("amazon");
+  });
+
+  it("CheckoutFinished moves an approved session to done (cart hand-off terminal)", () => {
+    let s = hydrate("s1", logToApproval());
+    s = apply(s, { type: "Approved" });
+    s = apply(s, { type: "CheckoutFinished" });
+    expect(s.status).toBe("done");
+  });
+
+  it("CheckoutFinished is ignored before approval", () => {
+    const s = hydrate("s1", logToApproval());
+    const after = apply(s, { type: "CheckoutFinished" });
+    expect(after).toBe(s); // unchanged reference: ignored pre-approval
+  });
+
   it("ignores Approved unless awaiting_approval (no irreversible jump)", () => {
     let s = apply(initialState("s1"), { type: "SessionStarted", request: REQUEST });
     s = apply(s, { type: "PlanReady", items: ITEMS });
