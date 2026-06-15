@@ -14,6 +14,36 @@
 
 ---
 
+## 0. Implementation status (current vs this plan)
+
+> This section records where the code has diverged from / advanced beyond the original plan. The Epic
+> annotations in §8 carry the detail. The plan's forward-looking content is intentionally kept.
+
+- **Per-platform agents (new layer).** Amazon and Hyperpure no longer share one playbook/selector path.
+  `app/src/core/agents/` adds a `PlatformAgent` strategy contract (`ensureReady`/`search`/`readQuote`/
+  `addToCart`) over a `BrowserSession`, resolved by `AgentRegistry`. This refines the single-`PlatformAdapter`
+  idea of §3.1 into per-platform strategies while keeping the orchestrator decoupled.
+- **Active platforms: Hyperpure live, Amazon disabled.** Amazon's mobile site serves an AWS-WAF
+  bot-challenge that won't execute in the WebView (`AwsWafIntegration is not defined`, blank page, 0
+  elements). `ACTIVE_PLATFORMS` (`config.ts`, override `VITE_ACTIVE_PLATFORMS`) currently lists only
+  `hyperpure`; the `AmazonAgent` is retained for one-line re-enablement.
+- **Checkout reality = cart hand-off (not auto-place).** The live flow uses `CheckoutDriver.stageCart`:
+  best-effort add each line, then hand the user a "Review & checkout on {platform}" cart link and a
+  per-item "open to add manually" link for anything it couldn't add. The fully-automated `run()` path
+  (Verifier → checkout → OTP/payment HITL → place) exists and is tested, but is not what `ProcureFlow` runs.
+- **True prices + quantity reconciliation.** Amazon reads the detail-page buybox price (not the noisy
+  listing); per-line quantities are reconciled to each platform's sold pack size (`ceil(total / packSize)`);
+  the default per-item pick is the lowest ₹ per kg/L/piece.
+- **Guided-RAG knowledge: partial.** A curated per-platform policies/hints layer (`knowledge/` +
+  backend `/knowledge`) is implemented and consumed by agents. Continuous on-device learning from
+  screenshots/DOM is **pending** (`recordObservation` exists; the persistent learning pipeline is not wired).
+- **First-run login gate + opt-in debug tracing** are implemented (see Epics 0/6 and §3.5).
+
+**Pending / not yet built:** candidate/nearby-product selection UI, continuous RAG learning,
+CP-SAT optimizer (greedy ships), and re-enabling Amazon once the WAF challenge is solved.
+
+---
+
 ## 1. What we are building (scope)
 
 A mobile (Android-first) AI assistant that lets a retailer say or type *"order 10kg onions, 5kg paneer, 2 cartons of refined oil"* and then autonomously:
@@ -465,39 +495,47 @@ SKU normalization (mapping "Aashirvaad Atta 10kg" across Amazon and Hyperpure to
 ### Epic 0 — Foundations
 - **Tech:** project scaffold (Ionic + Capacitor, Capgo InAppBrowser), secure store (Keystore-backed + encrypted SQLite), `PlatformAdapter`/`AutomationEngine` interfaces, telemetry (OTel→Langfuse), feature flags, audit log, serverless Claude API proxy + secret-scrubbing, remote-config playbook loader.
 - **Feature:** onboarding; add-platform flow (user logs into each platform once inside an in-app WebView; we persist the session); settings.
+- **Implemented:** Ionic + Capacitor + Capgo scaffold; Spring Boot Anthropic proxy with `ANTHROPIC_STUB_MODE` deterministic offline path; hash-chained on-device audit log; `AutomationEngine` interface (plus the `PlatformAgent`/`BrowserSession` agent seam, §0); the guided-knowledge endpoint (`/knowledge`); a **first-run login gate** (`auth/loginStore.ts` + `ui/pages/LoginGate.tsx`, booleans only); opt-in debug tracing (`debug/automationDebug.ts`); and a `VITE_DEMO` demo seam (`MockAutomationEngine`). Secure-store is an in-memory seam in the app today (Keystore/SQLCipher wiring pending).
 
 ### Epic 1 — Conversation & intent
 - **Tech:** STT integration (+ vernacular), chat UI, voice push-to-talk, Claude-based intent/slot extraction, secret scrubbing before API calls.
 - **Feature:** "type or speak your order," confirmation chips, editable parsed item list, multilingual prompts.
 - **Acceptance:** "5 kilo aloo aur 2 carton tel" → `[{aloo,5,kg},{refined oil,2,carton}]` with ≥95% slot accuracy on a 200-utterance test set.
+- **Implemented:** `/intent` parser extracts **brand / variant / pack size + count** alongside qty/unit; an offline rule parser (stub mode) with a Claude path for branded/complex orders; device-side secret scrubbing (`intent/scrubForApi.ts`); editable item-list model (`intent/itemListModel.ts`) surfaced on item cards; i18n strings (en/hi/bn). Chat UI is implemented; a `SpeechInput` seam (`intent/speech.ts`) exists but the native Android STT implementation is not yet wired (a `NoopSpeechInput` stub is used, so text entry is the live path today).
 
 ### Epic 2 — WebView automation engine ← core
 - **Tech:** per-platform webview management (Capgo `id` + hidden mode), session/cookie persistence, DOM-serialization injection, action executor (`click/type/scroll/select`), MutationObserver + network-idle wait, message-bridge data return, screenshot capture, retry/backoff, circuit breaker.
 - **Feature:** "show me what the agent is doing" live WebView surface.
 - **Acceptance:** deterministically search, read price, and add a known SKU on a fixed test page with <2% flake over 100 runs.
+- **Implemented:** the Capgo bridge (`automation/bridge.ts`, + jsdom `MockBridge`), injected DOM serializer / settle-waiter / action executor (`automation/injected/`), per-platform hidden webviews, screenshot capture, retry/backoff + circuit breaker, `verifyStepEffect`, and OTP/payment detection. The agent layer adds raw `observe`/`act`/`captureScreenshot` primitives via `BrowserSession`. The "what the agent is doing" surface is the opt-in debug overlay (§3.5 / Epic 0); the bridge also traces injected `[hpinj]` diagnostics and filters benign console noise.
 
 ### Epic 3 — Site adapters: Hyperpure + Amazon.in
 - **Tech:** record deterministic playbooks per site (search box, result card, price node, add-to-cart, cart page, checkout entry, OTP detector, payment-vs-credit detector); Claude-grounded fallback wired in.
 - **Feature:** per-platform health indicator; "playbook stale" self-heal banner.
 - **Acceptance:** end-to-end add-to-cart for 20 common SKUs on each platform, ≥90% success unattended, 100% safe-stop before checkout.
+- **Implemented:** the divergent per-platform logic now lives in dedicated **agents** (§0), not a shared playbook. `HyperpureAgent` searches by navigating **straight to the deterministic results URL** (`/in/search/<slug>?type=SEARCH&query=…`) and adds from the **product detail page** (`/in/<slug>`), clicking ADD and **confirming** via the ADD→stepper swap or a cart-count rise (honest `failed` + product link otherwise). `AmazonAgent` reads the **true detail-page buybox price** (fixing the listing ₹99-vs-real-₹237 bug), extracts the ASIN, and does a native add-to-cart with added/failed confirmation. Curated per-platform **knowledge hints** (`knowledge/`) steer extraction. **Amazon is currently disabled** (AWS-WAF bot-wall — see §0); Hyperpure is the live platform. The Claude-grounded `/next-action` fallback and recorded fixtures exist; a UI health indicator / "playbook stale" banner is pending.
 
 ### Epic 4 — Comparison & optimizer
 - **Tech:** SKU normalizer (embedding + fuzzy + confirmed cache), `optimize()` greedy, per-order P&L generator, then CP-SAT behind same interface.
 - **Feature:** comparison card in rupees with per-item reason and total saving vs single-platform baseline.
 - **Acceptance:** optimizer never proposes an out-of-stock item; greedy within 5% of MILP optimum on a 50-case benchmark.
+- **Implemented:** greedy `optimize()` on the backend (`POST /optimize`) + the rupee comparison card. Three pricing refinements landed on the device: **pack-price normalisation** (`pricing/packPricing.ts`, ₹/kg·L·piece), **best-value default pins** (`optimizer/defaultSelection.ts`, lowest per-unit price so a 1 kg pack isn't beaten by a cheaper-looking 500 g pack), and **quantity reconciliation** (`pricing/quantityReconcile.ts`, `ceil(totalRequested / soldPackSize)`), all wired through `Orchestrator.optimize` so the comparison UI and staged cart use the correct counts. **Pending:** the embedding/fuzzy SKU normalizer, a candidate/nearby-product selection UI, and the CP-SAT optimizer (greedy ships).
 
 ### Epic 5 — HITL confirmation UX
 - **Tech:** approval state machine; modify flow (swap platform / qty / drop item → re-optimize); idempotent resumable session.
 - **Feature:** "Proceed / Modify / Cancel," inline edits, plain-language explanation, voice read-back.
 - **Acceptance:** modifying any line re-runs optimization and re-renders within 2s; nothing irreversible without explicit approval.
+- **Implemented:** the event-sourced `ProcurementSession` + single-writer `Orchestrator` (durable outbox, approval state machine); the comparison page supports per-item platform switching and re-optimize; plain-language rupee explanation. Voice read-back is pending (tied to the STT/TTS seam in Epic 1).
 
 ### Epic 6 — Checkout, OTP, payment, ordering
 - **Tech:** Verifier (cart-vs-plan assertion); checkout driver per platform; OTP hand-off (surface native field, never auto-fill); payment-required detection; credit-available → place order; order-confirmation parser; full audit trail.
 - **Feature:** OTP prompt, "complete payment" hand-off screen, order summary + reference numbers, receipts.
 - **Acceptance:** Verifier blocks 100% of injected cart-mismatch cases; agent pauses for human at every OTP/payment; order reference captured and stored.
+- **Implemented:** the `VerifierClient` cart-vs-plan gate, an **idempotent** `CheckoutDriver`, the OTP/payment HITL hand-off (`show()` + `awaitHuman()`, never auto-filling), the order-confirmation parser, and the hash-chained audit trail. **The live flow runs `CheckoutDriver.stageCart`** — a cart hand-off that best-effort adds each approved line (consuming each agent's `AddToCartResult`) and then stops, surfacing per-line "Added"/"Couldn't add — open product" links and a "Review & checkout on {platform}" cart link in `OrderSummaryPage`; `ProcureFlow.openProductForAdd`/`openCartForReview` foreground the WebView. The fully-automated `run()` path (verify → checkout → OTP/payment → place under idempotency) exists and is tested, but is not the default journey.
 
 ### Epic 7 — Observability, eval & self-healing (continuous)
 - **Tech:** golden-path eval harness (replayable site fixtures), step-level traces, playbook drift detection, shadow-mode for new playbooks, grounder confidence calibration, counterfactual logging. (Mirrors the QA framework already designed for the shopping agent.)
+- **Implemented (partial):** opt-in step-level tracing on-device (`debug/automationDebug.ts` overlay + `adb logcat`, including every backend/LLM call), backend telemetry step traces, recorded site fixtures, and a guided-knowledge layer that can `recordObservation` against a per-platform corpus. **Pending:** the replayable golden-path eval harness, playbook drift detection / shadow-mode promotion, grounder confidence calibration, and the continuous RAG learning loop (observations are curated/advisory today, not yet folded back into extraction automatically).
 
 ---
 
@@ -556,7 +594,7 @@ Build the interface and the optimizer/HITL/audit layers to be platform-count-agn
 
 | Phase | Scope | Outcome |
 |---|---|---|
-| **MVP** | Epics 0–6, Hyperpure + Amazon.in, greedy optimizer, full HITL | Retailer voices an order, sees a rupee-saving split, approves; agent fills both carts and stops at OTP/payment |
+| **MVP** | Epics 0–6, greedy optimizer, full HITL (**Hyperpure live; Amazon disabled** — see §0) | Retailer types an order, sees a rupee-saving split, approves; agent stages each active platform's cart and hands off to the user to review + check out (OTP/payment always human) |
 | **v1** | CP-SAT optimizer, eval harness, self-heal/shadow-mode, hardening | Defensible quality bar on two platforms |
 | **Future (out of scope)** | New web adapters, Accessibility-driven native apps, partner-API adapters, iOS | Enabled by the adapter interface; not built in this plan |
 

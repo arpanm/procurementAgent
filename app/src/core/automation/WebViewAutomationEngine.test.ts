@@ -318,6 +318,64 @@ describe("WebViewAutomationEngine with MockBridge", () => {
     expect(events.some((e) => e.type === "QuoteRead")).toBe(true);
   });
 
+  it("on a read, defers straight to vision WITHOUT burning Claude grounding calls", async () => {
+    // Hyperpure's listing DOM has no machine-readable prices, so the playbook can't extract. Grounding
+    // can't read it either and tends to navigate to the homepage — blanking the results we want to
+    // screenshot. The read must skip Claude entirely and vision the settled listing in place.
+    document.body.innerHTML = ``;
+    let nextActionCalls = 0;
+    const engine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({
+        nextAction: async () => {
+          nextActionCalls++;
+          return { type: "navigate", url: "https://www.hyperpure.com/" };
+        },
+        visionExtract: async () => ({
+          found: true,
+          title: "Onion (Big), 10 kg",
+          pricePaise: 36400,
+          inStock: true,
+        }),
+      }),
+      playbooks: { readProduct: { name: "read", steps: [() => null] } },
+      visionFallback: true,
+    });
+
+    const quote = await engine.readProduct(onion);
+    expect(quote.pricePaise).toBe(36400);
+    expect(nextActionCalls).toBe(0);
+  });
+
+  it("still runs the vision read when the read loop trips the circuit breaker", async () => {
+    // Regression: a failing read loop used to THROW (circuit breaker) and abort the item before the
+    // vision fallback ran — the "2nd item never sourced" bug. The loop throw must not skip vision.
+    document.body.innerHTML = ``;
+    const engine = new WebViewAutomationEngine({
+      platform: "hyperpure",
+      bridge: new MockBridge({ doc: document }),
+      backend: makeBackend({
+        visionExtract: async () => ({
+          found: true,
+          title: "Malai Paneer 1 kg",
+          pricePaise: 41000,
+          inStock: true,
+        }),
+      }),
+      // A playbook step that fails the read loop outright (→ tripCircuit → throw).
+      playbooks: {
+        readProduct: { name: "read", steps: [() => ({ type: "fail", reason: "boom" })] },
+      },
+      visionFallback: true,
+    });
+
+    const quotes = await engine.readProductCandidates(onion);
+    expect(quotes).toHaveLength(1);
+    expect(quotes[0].pricePaise).toBe(41000);
+    expect(quotes[0].title).toBe("Malai Paneer 1 kg");
+  });
+
   it("stamps quotes with the item's runtime canonicalItemId (multi-word), not the spaced name", async () => {
     // The backend normalizes ids to lowercase-no-spaces ("spring onion" → "springonion") and the
     // optimizer maps quotes to demand by that id. If a quote carries the spaced display name instead,

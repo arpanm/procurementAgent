@@ -208,6 +208,74 @@ describe("session reducer", () => {
     expect(s.items.map((i) => i.name)).toEqual(["potato"]);
   });
 
+  it("CandidatesCollected stores ranked alternatives per item (no-op on identical re-read)", () => {
+    let s = apply(initialState("s1"), { type: "SessionStarted", request: REQUEST });
+    s = apply(s, { type: "PlanReady", items: ITEMS });
+    const candidates = [
+      quote("hyperpure", "hp-potato-5kg", "potato"),
+      quote("hyperpure", "hp-potato-10kg", "potato"),
+    ];
+    s = apply(s, { type: "CandidatesCollected", canonicalItemId: "potato", candidates });
+    expect(s.candidatesByItem.potato).toEqual(candidates);
+    const v = s.version;
+    // Re-applying the identical list is a no-op (preserves reference / version).
+    const again = apply(s, { type: "CandidatesCollected", canonicalItemId: "potato", candidates });
+    expect(again).toBe(s);
+    expect(again.version).toBe(v);
+  });
+
+  it("ModifyRequested select-sku swaps the chosen quote and pins the platform", () => {
+    const alt = quote("hyperpure", "hp-potato-10kg", "potato");
+    let s = hydrate("s1", [
+      { type: "SessionStarted", request: REQUEST },
+      { type: "PlanReady", items: ITEMS },
+      { type: "QuoteCollected", quote: quote("hyperpure", "hp-potato", "potato") },
+      {
+        type: "CandidatesCollected",
+        canonicalItemId: "potato",
+        candidates: [quote("hyperpure", "hp-potato", "potato"), alt],
+      },
+      { type: "OptimizeStarted" },
+      { type: "Optimized", allocation: allocation() },
+      { type: "ApprovalRequested" },
+    ]);
+    s = apply(s, {
+      type: "ModifyRequested",
+      change: {
+        kind: "select-sku",
+        canonicalItemId: "potato",
+        itemName: "potato",
+        platform: "hyperpure",
+        skuId: "hp-potato-10kg",
+      },
+    });
+    // The hyperpure potato quote is replaced by the picked SKU, and the platform is pinned.
+    const potatoQuotes = s.quotes.filter(
+      (q) => q.canonicalItemId === "potato" && q.platform === "hyperpure",
+    );
+    expect(potatoQuotes).toHaveLength(1);
+    expect(potatoQuotes[0].skuId).toBe("hp-potato-10kg");
+    expect(s.pins.potato).toBe("hyperpure");
+    expect(s.status).toBe("modifying");
+  });
+
+  it("ModifyRequested select-sku with an unknown SKU only pins (no quote change)", () => {
+    let s = hydrate("s1", logToApproval());
+    const before = s.quotes;
+    s = apply(s, {
+      type: "ModifyRequested",
+      change: {
+        kind: "select-sku",
+        canonicalItemId: "potato",
+        itemName: "potato",
+        platform: "amazon",
+        skuId: "does-not-exist",
+      },
+    });
+    expect(s.quotes).toBe(before);
+    expect(s.pins.potato).toBe("amazon");
+  });
+
   it("Cancelled → cancelled and is terminal", () => {
     let s = hydrate("s1", logToApproval());
     s = apply(s, { type: "Cancelled" });

@@ -1,0 +1,16 @@
+{
+  "platform": "hyperpure",
+  "version": 1,
+  "policies": {
+    "priceFromDetailPage": false,
+    "trustListingPrice": true
+  },
+  "hints": {
+    "rejectTokens": ["sponsored"],
+    "processedVariantTokens": [],
+    "atcTokens": ["add"],
+    "addedTokens": ["added", "in cart"],
+    "searchNotes": ["Hyperpure grid is virtualized; read the listing via screenshot+vision."]
+  },
+  "notes": []
+}

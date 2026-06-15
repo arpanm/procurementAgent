@@ -11,6 +11,53 @@ import type {
   RequestedItem,
 } from "../domain/types";
 import type { EngineAction, Observation } from "../automation/AutomationEngine";
+import { isAutomationDebug, traceAutomation } from "../debug/automationDebug";
+
+/**
+ * Compact one-line summary of a request body for the debug log, so every backend call — especially the
+ * LLM-backed ones (`/next-action`, `/vision/extract`, `/intent`) — shows WHAT it asked, not just the URL.
+ * Never dumps full payloads (DOM/base64 are huge and may carry session text); only safe, identifying bits.
+ */
+function summarizeBody(path: string, body: unknown): string {
+  const b = (body ?? {}) as Record<string, unknown>;
+  try {
+    if (path.startsWith("/next-action")) {
+      const obs = (b.observation ?? {}) as { url?: string; elements?: unknown[] };
+      const hist = (b.history ?? []) as unknown[];
+      return `task="${String(b.task ?? "")}" url=${obs.url ?? "?"} elements=${obs.elements?.length ?? 0} history=${hist.length}`;
+    }
+    if (path.startsWith("/vision/extract")) {
+      const item = (b.item ?? {}) as { name?: string };
+      const kb = Math.round(String(b.imageBase64 ?? "").length / 1024);
+      return `item="${item.name ?? "?"}" image=${kb}KB`;
+    }
+    if (path.startsWith("/intent")) return `text="${String(b.text ?? "").slice(0, 80)}"`;
+    if (path.startsWith("/plan")) return `items=${((b.items ?? []) as unknown[]).length}`;
+    if (path.startsWith("/optimize"))
+      return `items=${((b.items ?? []) as unknown[]).length} quotes=${((b.quotes ?? []) as unknown[]).length}`;
+    if (path.startsWith("/verify"))
+      return `expected=${((b.expected ?? []) as unknown[]).length} actual=${((b.actual ?? []) as unknown[]).length}`;
+  } catch {
+    /* fall through to keys */
+  }
+  return Object.keys(b).join(",");
+}
+
+/** Compact one-line summary of a response for the debug log (identifying fields only, never full DOM). */
+function summarizeResult(path: string, result: unknown): string {
+  const r = (result ?? {}) as Record<string, unknown>;
+  try {
+    if (path.startsWith("/next-action")) return `action=${String(r.type ?? "?")}${r.idx !== undefined ? ` @${r.idx}` : ""}`;
+    if (path.startsWith("/vision/extract"))
+      return `found=${r.found} title="${String(r.title ?? "").slice(0, 40)}" price=${r.pricePaise ?? "?"}`;
+    if (path.startsWith("/intent"))
+      return `items=${((r.items ?? []) as unknown[]).length} confidence=${r.confidence ?? "?"}`;
+    if (path.startsWith("/verify")) return `ok=${r.ok} mismatches=${((r.mismatches ?? []) as unknown[]).length}`;
+  } catch {
+    /* fall through */
+  }
+  return "";
+}
 
 export interface PlanRequest {
   readonly requestText: string;
@@ -58,13 +105,28 @@ export interface VisionExtractRequest {
   readonly mimeType: string;
 }
 
+/** One ranked product the vision model read off a screenshot (title + price), best-first. */
+export interface VisionCandidate {
+  readonly skuId?: string;
+  readonly title: string;
+  readonly pricePaise: number;
+  readonly mrpPaise?: number;
+  readonly inStock?: boolean;
+}
+
 export interface VisionExtractResponse {
   readonly found: boolean;
+  /** The TOP-ranked candidate, mirrored as scalars for back-compat with single-quote callers. */
   readonly skuId?: string;
   readonly title?: string;
   readonly pricePaise?: number;
   readonly mrpPaise?: number;
   readonly inStock?: boolean;
+  /**
+   * The full ranked top-N list (best first) for the in-app "choose a nearby SKU" picker. Older
+   * backends omit it; callers fall back to the scalar fields as a single candidate.
+   */
+  readonly candidates?: readonly VisionCandidate[];
 }
 
 export interface OptimizeRequest {
@@ -188,6 +250,8 @@ export class HttpBackendClient implements BackendClient {
 
   private async post<T>(path: string, body: unknown): Promise<T> {
     const base = await this.resolveBase();
+    const started = Date.now();
+    this.logStart("POST", path, summarizeBody(path, body));
     let res;
     try {
       res = await this.withTimeout(path, (signal) =>
@@ -200,16 +264,22 @@ export class HttpBackendClient implements BackendClient {
       );
     } catch (err) {
       this.onTransportError();
+      this.logError("POST", path, started, err);
       throw err;
     }
     if (!res.ok) {
+      this.logFailStatus("POST", path, started, res.status);
       throw new Error(`Backend ${path} failed with status ${res.status}`);
     }
-    return (await res.json()) as T;
+    const result = (await res.json()) as T;
+    this.logEnd("POST", path, started, res.status, summarizeResult(path, result));
+    return result;
   }
 
   private async get<T>(path: string): Promise<T> {
     const base = await this.resolveBase();
+    const started = Date.now();
+    this.logStart("GET", path, "");
     let res;
     try {
       res = await this.withTimeout(path, (signal) =>
@@ -217,12 +287,42 @@ export class HttpBackendClient implements BackendClient {
       );
     } catch (err) {
       this.onTransportError();
+      this.logError("GET", path, started, err);
       throw err;
     }
     if (!res.ok) {
+      this.logFailStatus("GET", path, started, res.status);
       throw new Error(`Backend ${path} failed with status ${res.status}`);
     }
-    return (await res.json()) as T;
+    const result = (await res.json()) as T;
+    this.logEnd("GET", path, started, res.status, "");
+    return result;
+  }
+
+  // --- debug tracing (no-op unless VITE_DEBUG_AUTOMATION) -----------------------------------------
+  // Logs every backend call — including the Claude/vision LLM calls — with timing and a compact
+  // request/response summary, under the "backend" channel of the on-screen debug overlay.
+
+  private logStart(method: string, path: string, summary: string): void {
+    if (!isAutomationDebug()) return;
+    traceAutomation("think", `→ ${method} ${path}${summary ? ` · ${summary}` : ""}`, "backend");
+  }
+
+  private logEnd(method: string, path: string, started: number, status: number, summary: string): void {
+    if (!isAutomationDebug()) return;
+    const ms = Date.now() - started;
+    traceAutomation("info", `← ${method} ${path} ${status} in ${ms}ms${summary ? ` · ${summary}` : ""}`, "backend");
+  }
+
+  private logFailStatus(method: string, path: string, started: number, status: number): void {
+    if (!isAutomationDebug()) return;
+    traceAutomation("error", `✗ ${method} ${path} → HTTP ${status} in ${Date.now() - started}ms`, "backend");
+  }
+
+  private logError(method: string, path: string, started: number, err: unknown): void {
+    if (!isAutomationDebug()) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    traceAutomation("error", `✗ ${method} ${path} threw in ${Date.now() - started}ms: ${msg}`, "backend");
   }
 
   /**

@@ -26,9 +26,18 @@ public class VisionExtractResponder implements ClaudeResponder {
         String user = request.user() == null ? "" : request.user();
         Matcher m = NAME.matcher(user);
         String name = m.find() && !m.group(1).isBlank() ? m.group(1) : "item";
-        String title = capitalize(name) + " (sample)";
-        return "{\"found\":true,\"title\":\"" + escape(title)
-                + "\",\"pricePaise\":50000,\"mrpPaise\":60000,\"inStock\":true}";
+        String base = capitalize(name);
+        // Echo a small ranked list so the device's candidate/picker path runs offline. The first
+        // candidate stays at ₹500 so the legacy single-quote assertions hold; alternates vary by size.
+        String c1 = candidate(base + " (sample)", 50000, 60000);
+        String c2 = candidate(base + " 1 Kg (sample)", 90000, 100000);
+        String c3 = candidate(base + " 500 g (sample)", 48000, 55000);
+        return "{\"found\":true,\"candidates\":[" + c1 + "," + c2 + "," + c3 + "]}";
+    }
+
+    private static String candidate(String title, long pricePaise, long mrpPaise) {
+        return "{\"title\":\"" + escape(title) + "\",\"pricePaise\":" + pricePaise
+                + ",\"mrpPaise\":" + mrpPaise + ",\"inStock\":true}";
     }
 
     private static String capitalize(String s) {

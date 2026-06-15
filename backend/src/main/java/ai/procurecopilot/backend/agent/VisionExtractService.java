@@ -5,9 +5,13 @@ import ai.procurecopilot.backend.llm.ClaudeRequest;
 import ai.procurecopilot.backend.llm.ClaudeService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -24,21 +28,23 @@ import org.springframework.stereotype.Service;
 public class VisionExtractService {
 
     private static final String SYSTEM = """
-            You read ONE best-matching product from a screenshot of a grocery/B2B shopping app's search
+            You read the matching products from a screenshot of a grocery/B2B shopping app's search
             results or product page. Reply with EXACTLY ONE JSON object, no prose:
-            {"found":true|false,"title":string,"pricePaise":integer,"mrpPaise":integer|null,
-            "inStock":true|false}. pricePaise is the pack/selling price in PAISE (multiply rupees by
-            100; e.g. ₹658 -> 65800). Choose the product tile that best matches the requested item,
-            ranking by name first, then brand, then variant. Treat close synonyms and category
-            equivalents as a match (e.g. "chicken legs" == "chicken drumsticks"/"drumsticks";
-            "capsicum" == "bell pepper").
-            Pack size is a PREFERENCE, not a hard filter: if the exact requested pack size is not shown,
-            STILL return the same product/brand in the closest available size (e.g. requested "500 g"
-            but only "1 Kg" of that brand is visible -> return the 1 Kg pack). Likewise if the brand is
-            not present, return the closest same-product match from another brand.
-            If the screenshot is a single product-detail page, read THAT product. Prefer the prominent
-            selling price, not the per-kg unit price. Only reply {"found":false} when NO product of the
-            requested kind (and no synonym/equivalent) is visible at all, or none has a readable price.""";
+            {"found":true|false,"candidates":[{"title":string,"pricePaise":integer,
+            "mrpPaise":integer|null,"inStock":true|false}, ...]}. Return UP TO 5 candidates, RANKED
+            best-match first. pricePaise is the pack/selling price in PAISE (multiply rupees by 100;
+            e.g. ₹658 -> 65800). Rank by name first, then brand, then variant, then how close the pack
+            size is to the requested one. Treat close synonyms and category equivalents as a match
+            (e.g. "chicken legs" == "chicken drumsticks"/"drumsticks"; "capsicum" == "bell pepper").
+            Pack size is a PREFERENCE, not a hard filter: include the same product/brand in nearby
+            sizes (e.g. requested "500 g" but a "1 Kg" pack of that brand is visible -> include it).
+            Include closest same-product matches from OTHER brands too when the requested brand/size is
+            not present, so the user can choose. Each candidate must be a DISTINCT product tile with a
+            readable price; never repeat the same SKU.
+            If the screenshot is a single product-detail page, return THAT product as the only
+            candidate. Prefer the prominent selling price, not the per-kg unit price. Only reply
+            {"found":false} when NO product of the requested kind (and no synonym/equivalent) is
+            visible at all, or none has a readable price.""";
 
     private static final Logger log = LoggerFactory.getLogger(VisionExtractService.class);
 
@@ -89,7 +95,12 @@ public class VisionExtractService {
         }
     }
 
-    /** Defensively parse the model completion into a response, or {@code not found}. */
+    /**
+     * Defensively parse the model completion into a ranked response, or {@code not found}. Accepts the
+     * new {@code {"found":true,"candidates":[...]}} array shape AND the legacy single-object
+     * {@code {"found":true,"title":...,"pricePaise":...}} shape (treated as one candidate), so a model
+     * that ignores the array instruction still yields a usable top quote.
+     */
     VisionExtractResponse parse(String raw) {
         if (raw == null || raw.isBlank()) {
             return VisionExtractResponse.notFound();
@@ -104,22 +115,47 @@ public class VisionExtractService {
             if (!node.isObject() || !node.path("found").asBoolean(false)) {
                 return VisionExtractResponse.notFound();
             }
-            JsonNode price = node.get("pricePaise");
-            if (price == null || !price.canConvertToLong() || price.asLong() <= 0) {
-                return VisionExtractResponse.notFound();
+            List<VisionExtractResponse.Candidate> ranked = new ArrayList<>();
+            Set<String> seenSkus = new LinkedHashSet<>();
+            JsonNode candidates = node.get("candidates");
+            if (candidates != null && candidates.isArray()) {
+                for (JsonNode c : candidates) {
+                    addCandidate(ranked, seenSkus, c);
+                }
             }
-            String title = node.path("title").asText("").trim();
-            if (title.isEmpty()) {
-                return VisionExtractResponse.notFound();
+            // Back-compat: a single-object completion (no candidates array) is one candidate.
+            if (ranked.isEmpty()) {
+                addCandidate(ranked, seenSkus, node);
             }
-            Long mrp = node.has("mrpPaise") && node.get("mrpPaise").canConvertToLong()
-                    ? node.get("mrpPaise").asLong()
-                    : null;
-            boolean inStock = node.path("inStock").asBoolean(true);
-            return new VisionExtractResponse(true, slug(title), title, price.asLong(), mrp, inStock);
+            return VisionExtractResponse.of(ranked);
         } catch (Exception e) {
             return VisionExtractResponse.notFound();
         }
+    }
+
+    /** Append a candidate parsed from a JSON node if it has a non-empty title and a usable price. */
+    private static void addCandidate(
+            List<VisionExtractResponse.Candidate> out, Set<String> seenSkus, JsonNode node) {
+        if (out.size() >= 5 || node == null || !node.isObject()) {
+            return;
+        }
+        JsonNode price = node.get("pricePaise");
+        if (price == null || !price.canConvertToLong() || price.asLong() <= 0) {
+            return;
+        }
+        String title = node.path("title").asText("").trim();
+        if (title.isEmpty()) {
+            return;
+        }
+        String sku = slug(title);
+        if (!seenSkus.add(sku)) {
+            return; // skip a repeated SKU so the picker shows distinct options
+        }
+        Long mrp = node.has("mrpPaise") && node.get("mrpPaise").canConvertToLong()
+                ? node.get("mrpPaise").asLong()
+                : null;
+        boolean inStock = node.path("inStock").asBoolean(true);
+        out.add(new VisionExtractResponse.Candidate(sku, title, price.asLong(), mrp, inStock));
     }
 
     /** Stable SKU id from a title (no href is available from a screenshot). */

@@ -467,6 +467,133 @@ describe("CheckoutDriver — stageCart (cart hand-off)", () => {
     const trail = await audit.entries();
     expect(trail.find((e) => e.action === "cart:add-failed")).toBeTruthy();
   });
+
+  // ----- PHASE 0b REGRESSION LOCK: the exact stageCart hand-off contract -----
+  // Pins the whole hand-off behaviour in one place so the per-platform-agent refactor
+  // can't drift the OrderAttempt shape OR re-introduce any auto-checkout side effect.
+  it("locks the cart_filled hand-off contract: cartUrl + stagedLineCount, and ZERO checkout side effects", async () => {
+    const TWO_LINE: PlatformAllocation = {
+      ...ALLOCATION,
+      lines: [
+        PLAN_LINE,
+        {
+          canonicalItemId: "onion",
+          itemName: "onion",
+          platform: "hyperpure",
+          skuId: "hp-onion",
+          qty: 2,
+          unitPricePaise: 1500,
+          lineTotalPaise: 3000,
+          reason: "cheaper on Hyperpure",
+        },
+      ],
+      subtotalPaise: 8000,
+      totalPaise: 8000,
+    };
+
+    const fake = makeFakeEngine({});
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      backend: makeBackend(),
+      audit,
+      cartUrl: "https://www.hyperpure.com/in/cart",
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    const attempt = await driver.stageCart(TWO_LINE);
+
+    // OrderAttempt contract surfaced to the summary hand-off UI.
+    expect(attempt.status).toBe("cart_filled");
+    expect(attempt.platform).toBe("hyperpure");
+    expect(attempt.cartUrl).toBe("https://www.hyperpure.com/in/cart");
+    expect(attempt.stagedLineCount).toBe(2);
+    expect(attempt.totalPaise).toBe(8000);
+    expect(attempt.paidOnCredit).toBe(false);
+    expect(attempt.orderRef).toBeUndefined();
+
+    // Best-effort add happened, but NONE of the verify/checkout/place machinery ran.
+    expect(fake.calls).toContain("addToCart");
+    expect(fake.calls).not.toContain("clearCart");
+    expect(fake.calls).not.toContain("getCart");
+    expect(fake.checkout).not.toHaveBeenCalled();
+    expect(fake.placeOrder).not.toHaveBeenCalled();
+    expect(fake.show).not.toHaveBeenCalled();
+  });
+});
+
+// ----- stageCart with an injected per-platform agent (added vs couldn't-add hand-off) -----
+
+describe("CheckoutDriver — stageCart with a per-platform agent", () => {
+  const TWO_LINE: PlatformAllocation = {
+    ...ALLOCATION,
+    lines: [
+      PLAN_LINE,
+      {
+        canonicalItemId: "paneer",
+        itemName: "paneer",
+        platform: "hyperpure",
+        skuId: "hp-paneer",
+        qty: 2,
+        unitPricePaise: 1500,
+        lineTotalPaise: 3000,
+        reason: "x",
+      },
+    ],
+    subtotalPaise: 8000,
+    totalPaise: 8000,
+  };
+
+  it("records per-line added/failed in stagedLines and counts only the added", async () => {
+    const fake = makeFakeEngine({});
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    // Agent adds the potato but cannot add the paneer (hands back a product URL for manual add).
+    const agent = {
+      platform: "hyperpure" as const,
+      ensureReady: vi.fn().mockResolvedValue(undefined),
+      search: vi.fn().mockResolvedValue(undefined),
+      readQuote: vi.fn(),
+      addToCart: vi.fn(async (line: { skuId: string; qty: number }) =>
+        line.skuId === "hp-potato"
+          ? { status: "added" as const, skuId: line.skuId, qty: line.qty, cartUrl: "https://cart" }
+          : {
+              status: "failed" as const,
+              skuId: line.skuId,
+              qty: line.qty,
+              productUrl: "https://www.hyperpure.com/p/paneer",
+              reason: "out of stock",
+            },
+      ),
+    };
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      agent,
+      backend: makeBackend(),
+      audit,
+      cartUrl: "https://www.hyperpure.com/in/cart",
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    const attempt = await driver.stageCart(TWO_LINE);
+
+    expect(attempt.status).toBe("cart_filled");
+    expect(attempt.stagedLineCount).toBe(1); // only the potato added
+    expect(attempt.stagedLines).toHaveLength(2);
+    const potato = attempt.stagedLines?.find((l) => l.canonicalItemId === "potato");
+    const paneer = attempt.stagedLines?.find((l) => l.canonicalItemId === "paneer");
+    expect(potato?.status).toBe("added");
+    expect(paneer?.status).toBe("failed");
+    expect(paneer?.productUrl).toBe("https://www.hyperpure.com/p/paneer");
+    expect(paneer?.reason).toBe("out of stock");
+
+    // The driver routed adds through the agent, not the engine directly.
+    expect(agent.addToCart).toHaveBeenCalledTimes(2);
+    expect(fake.calls).not.toContain("addToCart");
+
+    const trail = await audit.entries();
+    expect(trail.find((e) => e.action === "cart:add")).toBeTruthy();
+    expect(trail.find((e) => e.action === "cart:add-failed")).toBeTruthy();
+  });
 });
 
 // ----- credit_ok happy path + idempotency -----

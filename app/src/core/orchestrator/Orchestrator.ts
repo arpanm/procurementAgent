@@ -115,6 +115,17 @@ export class Orchestrator implements ReadableStore<SessionState> {
   }
 
   /**
+   * Record the ranked candidate SKUs for an item (best first) for the in-app "choose a nearby SKU"
+   * picker. Stored separately from {@link recordQuote}'s chosen quote, which is what the optimizer runs
+   * against. No-op for an empty list.
+   */
+  recordCandidates(canonicalItemId: string, candidates: readonly Quote[]): void {
+    if (candidates.length > 0) {
+      this.dispatch({ type: "CandidatesCollected", canonicalItemId, candidates });
+    }
+  }
+
+  /**
    * Seed the default per-item platform picks (best ₹/unit) before optimizing. These are defaults only:
    * a later user swap-platform edit overrides them. Call before {@link optimize} so the first
    * allocation reflects best value rather than the backend's raw-pack-price ranking.

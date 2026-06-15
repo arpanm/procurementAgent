@@ -34,6 +34,23 @@ export const PLATFORM_URLS: Record<PlatformId, string> = {
 };
 
 /**
+ * Platforms the app actively drives (opens, logs into, searches, adds to cart). Amazon is currently
+ * DISABLED: its mobile site serves an AWS-WAF bot-challenge that won't execute in the WebView (blank
+ * screen, `AwsWafIntegration is not defined`, 0 elements), so it can't be sourced reliably. Keeping it
+ * out of this list removes it from every stage — quoting, the loading pills, the optimizer, and
+ * checkout — without deleting the AmazonAgent, so re-enabling later is a one-line change here. The
+ * `VITE_ACTIVE_PLATFORMS` env (comma-separated) can override for experiments.
+ */
+export const ACTIVE_PLATFORMS: readonly PlatformId[] = ((): readonly PlatformId[] => {
+  const known: PlatformId[] = ["hyperpure", "amazon"];
+  const configured = (env.VITE_ACTIVE_PLATFORMS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s): s is PlatformId => (known as string[]).includes(s));
+  return configured.length > 0 ? configured : ["hyperpure"];
+})();
+
+/**
  * Each platform's cart URL. After the agent stages items (best-effort add-to-cart), checkout is handed
  * off to the user: the summary offers a "Review & checkout on {platform}" button that re-opens this
  * URL in the foreground (the logged-in WebView session) so the user can adjust and complete the order.

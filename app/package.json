@@ -16,6 +16,8 @@
     "test:e2e:ui": "playwright test --ui",
     "cap:sync": "cap sync android",
     "adb:reverse": "\"${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools/adb\" reverse tcp:8080 tcp:8080 || true",
+    "android:demo:build": "bash scripts/android-demo-build.sh",
+    "test:e2e:android": "npm run adb:reverse && wdio run e2e-android/wdio.conf.ts",
     "android:emulator": "npm run build && cap sync android && npm run adb:reverse && cap run android",
     "android:device": "npm run build && cap sync android && npm run adb:reverse && cap run android",
     "android:debug": "VITE_DEBUG_AUTOMATION=1 npm run build && cap sync android && npm run adb:reverse && cap run android"
@@ -36,15 +38,25 @@
     "@playwright/test": "^1.60.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",
+    "@types/mocha": "^10.0.10",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@types/react-router": "^5.1.20",
     "@types/react-router-dom": "^5.3.3",
     "@vitejs/plugin-react": "^4.3.4",
     "@vitest/coverage-v8": "^2.1.8",
+    "@wdio/appium-service": "^9.28.0",
+    "@wdio/cli": "^9.28.0",
+    "@wdio/local-runner": "^9.28.0",
+    "@wdio/mocha-framework": "^9.28.0",
+    "@wdio/spec-reporter": "^9.28.0",
+    "appium": "^3.5.0",
+    "appium-uiautomator2-driver": "^7.6.1",
     "jsdom": "^25.0.1",
+    "tsx": "^4.22.4",
     "typescript": "^5.7.2",
     "vite": "^5.4.11",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "wdio-wait-for": "^3.1.1"
   }
 }

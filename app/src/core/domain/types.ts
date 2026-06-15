@@ -81,6 +81,13 @@ export interface Quote {
    */
   readonly packSize?: string;
   readonly inStock: boolean;
+  /**
+   * How well this SKU matches the requested item: "exact" when brand AND pack size both match, else
+   * "nearby" (a close substitute — different brand/size). Drives the in-app "choose a nearby SKU"
+   * picker: an exact match is auto-picked silently; a nearby default invites the user to choose.
+   * Computed at read time; absent on quotes from paths that don't classify (treated as unknown).
+   */
+  readonly matchKind?: "exact" | "nearby";
   /** Absolute product detail-page URL, so checkout can re-open the exact product to add it to cart. */
   readonly productUrl?: string;
   /** How many units are purchasable, if the platform caps it. */
@@ -163,8 +170,27 @@ export interface OrderAttempt {
    * can offer a "Review & checkout on {platform}" button that re-opens the cart in the foreground.
    */
   readonly cartUrl?: string;
-  /** Number of approved lines we attempted to add to this platform's cart (for the summary copy). */
+  /** Number of approved lines successfully added to this platform's cart (for the summary copy). */
   readonly stagedLineCount?: number;
+  /**
+   * Per-line outcome of the cart-staging hand-off: which approved items the agent actually added vs.
+   * which it couldn't add automatically (so the summary can hand the user a direct product link to add
+   * those manually — the model the user asked for). Set on `cart_filled` attempts.
+   */
+  readonly stagedLines?: readonly StagedLine[];
+}
+
+/** One approved line's outcome after the cart-staging hand-off. */
+export interface StagedLine {
+  readonly canonicalItemId: string;
+  readonly itemName: string;
+  readonly skuId: string;
+  readonly qty: number;
+  readonly status: "added" | "failed";
+  /** The product detail URL, surfaced so a `failed` line can be opened and added manually. */
+  readonly productUrl?: string;
+  /** Human-readable reason when `failed`. */
+  readonly reason?: string;
 }
 
 /** Helper to format paise as a ₹ string for narration/UX. */

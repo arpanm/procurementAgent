@@ -1,0 +1,16 @@
+{
+  "platform": "amazon",
+  "version": 1,
+  "policies": {
+    "priceFromDetailPage": true,
+    "trustListingPrice": false
+  },
+  "hints": {
+    "rejectTokens": ["sponsored", "apply the filter", "narrow results", "sort by", "did you mean"],
+    "processedVariantTokens": ["dehydrated", "dried", "flakes", "powder", "paste", "pickle", "sauce", "ketchup", "seeds", "sapling", "plant", "combo", "kit"],
+    "atcTokens": ["add to cart", "add to basket", "add to bag", "buy now"],
+    "addedTokens": ["added to cart", "cart subtotal", "proceed to checkout", "go to cart"],
+    "searchNotes": ["Amazon listing prices are unreliable; open the product detail page for the buybox price."]
+  },
+  "notes": []
+}

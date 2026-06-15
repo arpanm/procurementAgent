@@ -80,9 +80,49 @@ describe("OrderSummaryPage", () => {
 
     expect(screen.getByTestId("summary-headline")).toHaveTextContent("Your cart is ready");
     expect(screen.getByTestId("staged-amazon")).toHaveTextContent("1 item added");
+    // The hand-off affordance is explicit "Review & checkout on {platform}" copy (pre-refactor lock).
+    const review = screen.getByTestId("review-amazon");
+    expect(review).toHaveTextContent("Review & checkout on Amazon.in");
 
-    fireEvent.click(screen.getByTestId("review-amazon"));
+    // Enabled when a cart URL + handler are present — clicking hands the platform back to the user.
+    fireEvent.click(review);
     expect(onOpenCart).toHaveBeenCalledWith("amazon");
+  });
+
+  it("lists items the agent couldn't add and opens the product page on tap", () => {
+    const staged: OrderAttempt = {
+      platform: "amazon",
+      status: "cart_filled",
+      totalPaise: 23700,
+      paidOnCredit: false,
+      idempotencyKey: "k",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:05.000Z",
+      cartUrl: "https://www.amazon.in/gp/cart/view.html",
+      stagedLineCount: 1,
+      stagedLines: [
+        { canonicalItemId: "paneer", itemName: "paneer", skuId: "B018E0LQ8W", qty: 6, status: "added" },
+        {
+          canonicalItemId: "butter",
+          itemName: "butter",
+          skuId: "B0BUTTER01",
+          qty: 2,
+          status: "failed",
+          productUrl: "https://www.amazon.in/dp/B0BUTTER01",
+          reason: "no add-to-cart button",
+        },
+      ],
+    };
+    const onOpenProduct = vi.fn();
+    render(
+      <OrderSummaryPage attempts={[staged]} onOpenCart={vi.fn()} onOpenProduct={onOpenProduct} />,
+    );
+
+    expect(screen.getByTestId("staged-failed-amazon")).toHaveTextContent("couldn't add 1 item");
+    const addBtn = screen.getByTestId("add-manually-amazon-butter");
+    expect(addBtn).toHaveTextContent("Open butter (2)");
+    fireEvent.click(addBtn);
+    expect(onOpenProduct).toHaveBeenCalledWith("amazon", "https://www.amazon.in/dp/B0BUTTER01");
   });
 
   it("disables the hand-off button when no cart URL is available", () => {

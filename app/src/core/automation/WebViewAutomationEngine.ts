@@ -212,8 +212,20 @@ const OTP_DOM_PATTERN = /\botp\b|one[-\s]?time[-\s]?(?:pass(?:word|code)|code|pi
 const PAYMENT_DOM_PATTERN =
   /\bpayment\b|pay now|proceed to pay|\bupi\b|card number|net\s?banking/i;
 const CART_BADGE_PATTERN = /cart/i;
-/** A product detail-page URL (vs. a search/listing/home page) on Amazon or Hyperpure. */
-const PRODUCT_DETAIL_URL_RE = /\/(dp|gp\/product|gp\/aw\/d)\/|hyperpure\.com\/in\/[^/]+\/[^/?]+/i;
+/**
+ * Is `url` a single-PRODUCT detail page (not a home/search/listing/cart page)?
+ *  - Amazon: `/dp/…`, `/gp/product/…`, `/gp/aw/d/…`.
+ *  - Hyperpure: a single slug under `/in/` — `/in/milky-mist-paneer-1-kg` — but NOT `/in/search/…`,
+ *    `/in/cart`, etc. (The old regex required `/in/<x>/<y>`, which wrongly matched `/in/search/paneer`
+ *    and missed the real one-segment product URL — the reason checkout kept re-opening the search page.)
+ */
+function looksLikeProductUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  if (/\/(dp|gp\/product|gp\/aw\/d)\//i.test(url)) return true;
+  const m = /hyperpure\.com\/in\/([a-z0-9][a-z0-9-]*)(?:[/?#]|$)/i.exec(url);
+  if (!m) return false;
+  return !["search", "cart", "checkout", "account", "orders", "products"].includes(m[1].toLowerCase());
+}
 
 export class WebViewAutomationEngine implements AutomationEngine {
   readonly platform: PlatformId;
@@ -296,6 +308,31 @@ export class WebViewAutomationEngine implements AutomationEngine {
     await this.bridge.hide(this.webviewId);
   }
 
+  // --- low-level primitives (the BrowserSession surface for per-platform agents) ----------------
+  // These expose the engine's perceive→act→screenshot loop so a PlatformAgent (AmazonAgent,
+  // HyperpureAgent) can implement its own strategy (e.g. open the product detail page to read the
+  // TRUE price, or click the native add-to-cart button) instead of being limited to the high-level
+  // search/readProduct/addToCart playbook path.
+
+  /** Serialize the current page into an {@link Observation} (public wrapper for agents). */
+  async observe(): Promise<Observation> {
+    return this.perceive();
+  }
+
+  /** Execute one action with the engine's retry/backoff and post-action settle. */
+  async act(action: EngineAction): Promise<ActionResult> {
+    return this.executeWithRetry(action);
+  }
+
+  /** Capture a webview screenshot as a data URL, or null on failure (never throws). */
+  async captureScreenshot(): Promise<string | null> {
+    try {
+      return await this.bridge.screenshot(this.webviewId);
+    } catch {
+      return null;
+    }
+  }
+
   // --- public engine API -----------------------------------------------------
 
   async search(item: RequestedItem): Promise<void> {
@@ -315,27 +352,68 @@ export class WebViewAutomationEngine implements AutomationEngine {
   }
 
   async readProduct(item: RequestedItem): Promise<Quote> {
-    const result = await this.runLoop({
-      stepName: "readProduct",
-      task: `read the best product matching "${item.name}"`,
-      playbook: this.playbooks.readProduct,
-      item,
-    });
+    const result = await this.runReadLoopSafe(item, `read the best product matching "${item.name}"`);
     let draft: QuoteDraft | undefined =
-      result.kind === "extract" && isQuoteDraft(result.data) ? result.data : undefined;
+      result?.kind === "extract" && isQuoteDraft(result.data) ? result.data : undefined;
     if (!draft && this.visionFallback) {
       draft = await this.visionReadProduct(item);
     }
     if (!draft) {
-      throw new Error(
-        result.kind !== "extract"
-          ? `readProduct(${item.name}): no quote was extracted`
-          : `readProduct(${item.name}): extracted data is not a valid quote`,
-      );
+      throw new Error(`readProduct(${item.name}): no quote could be read (DOM and vision both failed)`);
     }
     const quote = this.buildQuote(draft, item);
     this.emit({ type: "QuoteRead", platform: this.platform, quote });
     return quote;
+  }
+
+  /**
+   * Run the perceive→settle→extract loop for a read, but NEVER let a tripped circuit breaker (or any
+   * loop throw) abort the item: a thrown loop is swallowed so the caller can still attempt the vision
+   * read on whatever page is showing. Returns `undefined` when the loop produced no usable result.
+   */
+  private async runReadLoopSafe(item: RequestedItem, task: string): Promise<LoopResult | undefined> {
+    try {
+      return await this.runLoop({
+        stepName: "readProduct",
+        task,
+        playbook: this.playbooks.readProduct,
+        item,
+      });
+    } catch (err) {
+      this.trace(
+        "warn",
+        `read loop failed (${err instanceof Error ? err.message : String(err)}) → falling back to vision`,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Read a RANKED list of candidate products (best first). Runs the same settle+extract loop as
+   * {@link readProduct} (so a virtualized listing renders), then asks the vision model for the top-N
+   * matches; a DOM-extracted draft, when present, is the authoritative primary and vision candidates
+   * fill the picker. Deduped by skuId. Falls back to a single {@link readProduct} when vision is off.
+   */
+  async readProductCandidates(item: RequestedItem): Promise<readonly Quote[]> {
+    const result = await this.runReadLoopSafe(item, `read candidate products matching "${item.name}"`);
+    const domDraft: QuoteDraft | undefined =
+      result?.kind === "extract" && isQuoteDraft(result.data) ? result.data : undefined;
+    const visionDrafts = this.visionFallback ? await this.visionReadCandidates(item) : [];
+
+    const ordered: QuoteDraft[] = [];
+    const seen = new Set<string>();
+    for (const draft of [...(domDraft ? [domDraft] : []), ...visionDrafts]) {
+      if (seen.has(draft.skuId)) continue;
+      seen.add(draft.skuId);
+      ordered.push(draft);
+    }
+    if (ordered.length === 0) {
+      throw new Error(`readProductCandidates(${item.name}): no candidate products were extracted`);
+    }
+    const quotes = ordered.map((draft) => this.buildQuote(draft, item));
+    // The primary read drives the optimizer; emit it as the canonical QuoteRead (same as readProduct).
+    this.emit({ type: "QuoteRead", platform: this.platform, quote: quotes[0] });
+    return quotes;
   }
 
   async addToCart(skuId: string, qty: number): Promise<void> {
@@ -692,6 +770,15 @@ export class WebViewAutomationEngine implements AutomationEngine {
         });
       }
       if (action === null) {
+        // Vision-first read: when the playbook can't act on a `readProduct` step AND a vision fallback
+        // exists, DON'T burn Claude grounding calls. On price-less SPA listings (Hyperpure) grounding
+        // can't read the DOM and tends to navigate to the homepage — blanking the very results we want
+        // to screenshot, then tripping the circuit breaker (the "2nd item never sourced" regression).
+        // End the loop here so the caller runs the vision read on THIS settled listing instead.
+        if (this.visionFallback && args.stepName === "readProduct") {
+          this.trace("think", "↳ no DOM extract; using vision read (skipping Claude grounding)");
+          return { kind: "done" };
+        }
         this.trace("think", forceBackend ? "↳ self-heal: asking Claude" : "↳ playbook deferred: asking Claude");
         action = await this.backend.nextAction({
           platform: this.platform,
@@ -817,6 +904,40 @@ export class WebViewAutomationEngine implements AutomationEngine {
     return obs;
   }
 
+  /**
+   * Find the product detail URL for the chosen product `title` by reading the current listing DOM: pick
+   * the product anchor (`<a href>`) whose href is a product page AND whose href-slug / link text overlaps
+   * the title the most. Matching on the slug ("milky-mist-paneer-1-kg") is robust even when the anchor has
+   * no text (image-only tile). Returns undefined (best-effort) so a failure never breaks the read.
+   */
+  private async findProductUrlForTitle(title: string): Promise<string | undefined> {
+    const tokens = title
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length > 2);
+    if (tokens.length === 0) return undefined;
+    let obs: Observation;
+    try {
+      obs = await this.perceive();
+    } catch {
+      return undefined;
+    }
+    let bestHref: string | undefined;
+    let bestScore = 0;
+    for (const el of obs.elements) {
+      const abs = this.absoluteUrl(el.attrs?.href ?? undefined);
+      if (!abs || !looksLikeProductUrl(abs)) continue;
+      const hay = `${el.name ?? ""} ${abs}`.toLowerCase();
+      const score = tokens.reduce((s, t) => (hay.includes(t) ? s + 1 : s), 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestHref = abs;
+      }
+    }
+    // Require at least a couple of token hits so we don't latch onto an unrelated product link.
+    return bestScore >= Math.min(2, tokens.length) ? bestHref : undefined;
+  }
+
   /** Resolve a relative/absolute href against the last observed page URL (best-effort). */
   private absoluteUrl(href: string | undefined): string | undefined {
     if (!href) return undefined;
@@ -915,7 +1036,20 @@ export class WebViewAutomationEngine implements AutomationEngine {
    * any failure so the caller treats the item as unsourced (never invents a price).
    */
   private async visionReadProduct(item: RequestedItem): Promise<QuoteDraft | undefined> {
-    if (!this.backend.visionExtract) return undefined;
+    const drafts = await this.visionReadCandidates(item);
+    return drafts[0];
+  }
+
+  /**
+   * Vision read returning the RANKED candidate list (best first). One screenshot, then the backend
+   * reads up to N matching products; each is mapped to a {@link QuoteDraft} with its own detail-page
+   * URL resolved straight off the listing DOM ({@link findProductUrlForTitle}) so checkout/picker can
+   * open the exact product. Older backends that return only the scalar single product degrade to a
+   * one-element list. Returns `[]` on any failure (caller treats the item as unsourced — never a
+   * fabricated price).
+   */
+  private async visionReadCandidates(item: RequestedItem): Promise<QuoteDraft[]> {
+    if (!this.backend.visionExtract) return [];
     let restoreHidden = false;
     try {
       // A screenshot needs a rendered (shown) webview; reveal briefly if we're scraping hidden.
@@ -935,7 +1069,7 @@ export class WebViewAutomationEngine implements AutomationEngine {
       const img = parseDataUrl(dataUrl);
       if (!img) {
         this.trace("warn", `vision-extract: no screenshot captured (dataUrl len=${(dataUrl ?? "").length})`);
-        return undefined;
+        return [];
       }
       // Device-side evidence: a too-small payload means the webview wasn't painted/revealed in time
       // (blank capture) — distinct from a valid screenshot the model simply couldn't read. A real
@@ -952,29 +1086,62 @@ export class WebViewAutomationEngine implements AutomationEngine {
         imageBase64: img.base64,
         mimeType: img.mimeType,
       });
-      if (!res.found || typeof res.pricePaise !== "number" || !res.title) {
+      // Prefer the ranked `candidates` list; fall back to the scalar single product for older backends.
+      const raw =
+        res.candidates && res.candidates.length > 0
+          ? res.candidates
+          : res.found && typeof res.pricePaise === "number" && res.title
+            ? [
+                {
+                  skuId: res.skuId,
+                  title: res.title,
+                  pricePaise: res.pricePaise,
+                  mrpPaise: res.mrpPaise,
+                  inStock: res.inStock,
+                },
+              ]
+            : [];
+      if (raw.length === 0) {
         this.trace("info", `vision-extract: no matching product in screenshot for "${item.name}"`);
-        return undefined;
+        return [];
       }
-      this.trace(
-        "info",
-        `vision-extract → "${res.title}" ₹${(res.pricePaise / 100).toFixed(2)} inStock=${res.inStock ?? true}`,
-      );
-      return {
-        skuId: res.skuId ?? slugify(res.title),
-        canonicalItemId: canonicalIdOf(item),
-        title: res.title,
-        pricePaise: res.pricePaise,
-        mrpPaise: res.mrpPaise,
-        inStock: res.inStock ?? true,
-        // If the screenshot was taken on a product detail page, remember it so checkout can re-open the
-        // exact product. On a search-listing screenshot there is no single product URL, so leave it
-        // unset and checkout will re-search instead.
-        productUrl: PRODUCT_DETAIL_URL_RE.test(this.lastUrl) ? this.lastUrl : undefined,
-      };
+      const drafts: QuoteDraft[] = [];
+      const seen = new Set<string>();
+      for (const c of raw) {
+        if (typeof c.pricePaise !== "number" || !c.title) continue;
+        const skuId = c.skuId ?? slugify(c.title);
+        if (seen.has(skuId)) continue;
+        seen.add(skuId);
+        // Capture each candidate's detail-page URL straight off the listing DOM (the user's ask: "save
+        // the product details page URL from the search result while choosing the right product"). On a
+        // search listing the screenshot has no single URL, but the matching tile is an
+        // <a href="/in/…slug"> we can read — so checkout/picker opens that product directly.
+        const productUrl =
+          (await this.findProductUrlForTitle(c.title)) ??
+          (looksLikeProductUrl(this.lastUrl) ? this.lastUrl : undefined);
+        drafts.push({
+          skuId,
+          canonicalItemId: canonicalIdOf(item),
+          title: c.title,
+          pricePaise: c.pricePaise,
+          mrpPaise: c.mrpPaise,
+          inStock: c.inStock ?? true,
+          productUrl,
+        });
+      }
+      if (drafts.length > 0) {
+        const top = drafts[0];
+        this.trace(
+          "info",
+          `vision-extract → ${drafts.length} candidate(s); top "${top.title}" ` +
+            `₹${(top.pricePaise / 100).toFixed(2)} inStock=${top.inStock}` +
+            (top.productUrl ? ` · ${top.productUrl}` : ""),
+        );
+      }
+      return drafts;
     } catch (e) {
       this.trace("warn", `vision-extract failed: ${String(e)}`);
-      return undefined;
+      return [];
     } finally {
       if (restoreHidden) {
         try {

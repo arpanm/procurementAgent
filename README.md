@@ -1,10 +1,19 @@
 # Procure Copilot — MVP
 
 Mobile (Android-first) agentic procurement assistant. A retailer says/types an order; the app reads
-prices on **Hyperpure** and **Amazon.in** in controlled WebViews, runs a cart-split optimizer, shows
-a rupee-saving split for approval, then fills both carts and **stops at OTP/payment** (human-in-the-loop).
+prices in controlled WebViews using **per-platform agents**, runs a cart-split optimizer, shows a
+rupee-saving split for approval, then best-effort **stages each platform's cart** and hands off to the
+user to review and check out (OTP/payment is **always** the human — no code path auto-fills either).
 
-This repo implements **Epics 0–6** of [`PROCURE_COPILOT_PLAN.md`](./PROCURE_COPILOT_PLAN.md) (the MVP).
+> **Active platforms:** **Hyperpure is live; Amazon is currently disabled.** Amazon's mobile site
+> serves an AWS-WAF bot-challenge that won't execute in the WebView (blank screen,
+> `AwsWafIntegration is not defined`, 0 elements), so it can't be sourced reliably. The `AmazonAgent`
+> code is retained for re-enablement — the active set is the one-line `ACTIVE_PLATFORMS` in
+> `app/src/core/config.ts` (override with `VITE_ACTIVE_PLATFORMS`).
+
+This repo implements **Epics 0–6** of [`PROCURE_COPILOT_PLAN.md`](./PROCURE_COPILOT_PLAN.md) (the MVP),
+plus a per-platform agent split, true-price reads, quantity reconciliation, a guided-knowledge layer, a
+first-run login gate, and a cart hand-off — see the architecture notes below.
 
 ## Layout
 
@@ -14,26 +23,78 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
 ```
 
 ### App (`app/src/core`)
-- `domain/` — shared entities (money in **paise**), `PlatformId`, `Allocation`, `OrderAttempt`…
+- `domain/` — shared entities (money in **paise**), `PlatformId`, `Allocation`, `OrderAttempt`, `StagedLine`…
 - `automation/` — **Epic 2** WebView engine: injected DOM serializer / settle-waiter / action executor,
-  the Capgo bridge (+ jsdom `MockBridge`), and the perceive→reason→act loop with retry, circuit breaker,
-  `verifyStepEffect`, and OTP/payment detection.
-- `adapters/` — **Epic 3** Hyperpure + Amazon playbooks, selectors, recorded fixtures, engine factory + health/self-heal.
+  the Capgo bridge (+ jsdom `MockBridge`), the perceive→reason→act loop with retry, circuit breaker,
+  `verifyStepEffect`, OTP/payment detection, and the deterministic `MockAutomationEngine` (demo seam).
+- `agents/` — **per-platform agents** layered over the engine. `PlatformAgent` is the strategy contract
+  (`ensureReady`/`search`/`readQuote`/`addToCart` → `AddToCartResult {status:"added"|"failed", productUrl?,
+  cartUrl?, reason?}`); `BrowserSession` extends `AutomationEngine` with raw `observe`/`act`/`captureScreenshot`.
+  `AgentRegistry` (`agentFor`/`agentForEngine`) picks the implementation: `amazon/AmazonAgent` (detail-page
+  true-price + native add-to-cart, ASIN extraction), `hyperpure/HyperpureAgent` (direct results-URL search +
+  detail-page add with add/confirm), or the behavior-neutral `LegacyAgent` (used by the demo mock).
+- `adapters/` — **Epic 3** shared playbooks, selectors, recorded fixtures, engine factory + health/self-heal
+  (the per-platform agents in `agents/` now own the divergent Amazon/Hyperpure strategy).
+- `knowledge/` — **guided-RAG knowledge layer**: `PlatformKnowledge` model, `DefaultKnowledgeStore`
+  (`getKnowledge`/`recordObservation`, backend transport + built-in `defaults`). Feeds agents per-platform
+  policies/hints (e.g. `policies.priceFromDetailPage`, `hints.atcTokens`).
 - `intent/` — **Epic 1** device-side scrubber, intent client, editable item-list model, i18n (en/hi/bn).
-- `optimizer/` + `orchestrator/` — **Epic 5** event-sourced `ProcurementSession`, single-writer `Orchestrator`
-  with a durable outbox, optimizer client + rupee explanation.
-- `checkout/` + `audit/` — **Epic 6** Verifier gate, idempotent checkout driver, order-confirmation parser,
-  and a tamper-evident on-device audit log.
-- `backend/`, `secure/`, `config.ts` — backend HTTP client, secure-store seam, app config.
-- `ui/pages/ProcureFlow.tsx` — the end-to-end flow controller wiring all epics behind the orchestrator.
+- `optimizer/` + `pricing/` + `orchestrator/` — **Epics 4/5** event-sourced `ProcurementSession`,
+  single-writer `Orchestrator` with a durable outbox, optimizer client + rupee explanation;
+  `pricing/packPricing` (₹/kg·L·piece normalisation) + `pricing/quantityReconcile` (pack-count
+  reconciliation) + `optimizer/defaultSelection` (best-value default pins).
+- `auth/` — `loginStore` (localStorage-persisted per-platform sign-in confirmation; booleans only, never
+  credentials/OTPs) behind the first-run login gate.
+- `checkout/` + `audit/` — **Epic 6** Verifier gate, idempotent checkout driver (`run` = full place;
+  `stageCart` = best-effort add + hand-off), order-confirmation parser, tamper-evident on-device audit log.
+- `debug/` — opt-in `automationDebug` tracer + on-screen overlay (`VITE_DEBUG_AUTOMATION=1` / `?debugAuto=1`).
+- `backend/`, `secure/`, `config.ts` — backend HTTP client, secure-store seam, app config (`ACTIVE_PLATFORMS`).
+- `ui/pages/ProcureFlow.tsx` — the end-to-end flow controller wiring all epics, agents, the login gate and
+  the cart hand-off behind the orchestrator.
 
 ### Backend (`backend/src/main/java/ai/procurecopilot/backend`)
 - `llm/` — **Epic 0** `ClaudeService` (single entry point; stub mode for offline/CI), `SecretScrubber`.
 - `optimizer/` — **Epic 4** greedy cart-split optimizer (`POST /optimize`).
-- `agent/` — **Epic 1/2/6** `/intent`, `/plan`, `/next-action` (grounding), `/verify` (cart-vs-plan Verifier).
+- `agent/` — **Epic 1/2/6** `/intent`, `/plan`, `/next-action` (grounding), `/verify` (cart-vs-plan
+  Verifier), `/vision/extract` (screenshot price read).
+- `knowledge/` — **guided-RAG** `/knowledge/{platform}` (curated policies + hints) and
+  `/knowledge/{platform}/observations` (append a runtime note); the device falls back to built-in defaults.
 - `playbook/` — **Epic 0/3** playbook registry (`/playbooks/...`).
 - `session/` — **Epic 0/5/6** durable event store + SSE (`/sessions...`).
 - `telemetry/` — **Epic 0/7** step traces + audit.
+
+### Key capabilities (current implementation)
+
+- **Per-platform agents.** Amazon and Hyperpure no longer share one playbook. Each platform's strategy
+  lives in `app/src/core/agents/`, resolved by `AgentRegistry` and handed a `BrowserSession`.
+- **True prices.** `AmazonAgent` opens the product **detail page** and reads the buybox price
+  (`amazon/detailExtract.ts`) instead of the noisy search listing (which once read ₹99 for a ₹237 item);
+  it extracts the ASIN for a canonical `/dp/<ASIN>` URL.
+- **Reliable Hyperpure search & add.** `HyperpureAgent` navigates **straight to the results URL**
+  (`/in/search/<slug>?type=SEARCH&query=…`, via `hyperpureSearchUrl`) instead of typing + a synthetic Enter
+  that never fired autosuggest; add-to-cart opens the **detail page** (`/in/<slug>`, via
+  `hyperpureProductUrl`), clicks ADD and **confirms** via the ADD→stepper swap or a cart-count rise, falling
+  back to the listing and returning `failed` + a product link for an honest manual hand-off.
+- **Quantity reconciliation** (`pricing/quantityReconcile.ts`): the requested total demand is reconciled to
+  each platform's sold pack size — `ceil(totalRequested / soldPackSize)` (10 kg → 50×200 g / 40×250 g /
+  20×500 g / 10×1 kg / 5×2 kg / 2×5 kg / 1×10 kg; works for litres/ml too) — wired through
+  `Orchestrator.optimize` so the comparison UI and staged cart use the right counts.
+- **Best-value defaults** (`optimizer/defaultSelection.ts`): each item is pre-pinned to the lowest
+  **₹ per kg/L/piece** (`pricing/packPricing.ts`) so a 1 kg pack isn't beaten by a cheaper-*looking* 500 g pack.
+- **Guided-knowledge layer** (`knowledge/`): curated per-platform policies/hints steer the agents (e.g.
+  Amazon `priceFromDetailPage`, add-to-cart token hints), served by the backend with built-in offline
+  defaults. This is a **guided hints layer**; continuous on-device learning from screenshots/DOM is
+  **planned/partial** (`recordObservation` exists; the persistent learning pipeline is not yet wired).
+- **First-run login gate** (`auth/loginStore.ts` + `ui/pages/LoginGate.tsx`): the user manually signs in to
+  each active platform's WebView (OTP + delivery location) once; only a per-platform boolean is persisted —
+  never credentials/OTPs. The chat is gated until every `ACTIVE_PLATFORMS` entry is confirmed (demo mode skips it).
+- **Cart hand-off** (`checkout/CheckoutDriver.stageCart`): best-effort adds each approved line, then the
+  order summary shows items added (with a "Review & checkout on {platform}" cart link) and, for lines it
+  couldn't add, an "open it to add manually" product link. OTP/payment is never automated.
+- **Debug tracing** (`debug/automationDebug.ts`): with `VITE_DEBUG_AUTOMATION=1` (or `?debugAuto=1`) an
+  on-screen overlay + `adb logcat` stream every step, **every backend call including the Claude/vision LLM
+  calls** (`backend` channel, with timing + a compact request/response summary), WebView actions, and the
+  injected `[hpinj]` settle/emit diagnostics; benign console noise is filtered.
 
 ## Configuration (backend env vars)
 
@@ -141,12 +202,27 @@ Create `app/.env` (or `.env.local`) so you don't repeat it — never commit real
 VITE_BACKEND_URL=https://api.yourdomain.com
 ```
 
+#### App build-time env vars (`VITE_*`, read in `app/src/core/config.ts` & friends)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_BACKEND_URL` | _(probes `10.0.2.2:8080`, then `localhost:8080`)_ | Backend base URL(s), comma-separated; the client probes candidates and uses the reachable one. |
+| `VITE_ACTIVE_PLATFORMS` | `hyperpure` | Comma-separated platforms the app drives. Amazon is disabled by default (AWS-WAF bot-wall); set `hyperpure,amazon` to re-enable it. |
+| `VITE_DEBUG_AUTOMATION` | _(off)_ | `1` opens the WebView **visibly** and streams the live automation + backend/LLM trace to an on-screen overlay and `adb logcat` (`npm run android:debug` sets it). Keep **off** in committed builds. |
+| `VITE_DEMO` | _(off)_ | `1` (or `?demo=1` on the URL) swaps the real engine for a deterministic `MockAutomationEngine` so the full journey runs in a plain browser and the first-run login gate is skipped. |
+
+> **First run (real device):** the app shows a one-time **login gate** — open each active platform, sign
+> in and set your delivery location, then confirm. Only a boolean per platform is stored (never your
+> password/OTP); the WebView cookies persist, so later runs go straight to search. Demo mode skips this.
+
 ### Building the Android app
 
-The WebView automation engine (opening Hyperpure/Amazon, searching, adding to cart, OTP/payment
+The WebView automation engine (opening the active platforms, searching, staging the cart, OTP/payment
 hand-off) **only runs in a real Android WebView** — it cannot run in a desktop browser. So to see the
-end-to-end automation you must run on a device or emulator and be **logged in** to your Hyperpure and
-Amazon.in accounts inside the app's WebViews.
+end-to-end automation you must run on a device or emulator; the app's **first-run login gate** walks you
+through signing in to each active platform (Hyperpure today; Amazon is disabled by default — see above)
+inside the app's WebViews. To run the journey without real sites/login, use the demo APK
+(`npm run android:demo:build`).
 
 #### First-time toolchain setup (once per machine)
 
@@ -229,7 +305,11 @@ script does this) and redeploy. In debug mode:
   manually.)
 - **Visible scrape** — the search/read runs in a visible WebView so you can watch it.
 - **Live trace** — an on-screen overlay (and `adb logcat`) streams `perceive → plan → act → verify →
-  fail`. Use the overlay's **copy all** button to grab the full trace for analysis.
+  fail` plus the per-platform agent's own steps (URLs opened, ADD clicked, confirm/fail). It also traces
+  **every backend call — including the Claude/vision LLM calls** — under a `backend` channel
+  (`→ POST /next-action …` / `← 200 in 9123ms …`), and the injected in-WebView `[hpinj]` settle/emit
+  diagnostics; benign console noise (e.g. "Refused to set unsafe header") is filtered. The buffer holds up
+  to 2000 entries; use the overlay's **copy all** button to grab the full trace.
 
 This mode is local-only; keep `VITE_DEBUG_AUTOMATION` unset in committed builds. View the trace in a
 terminal with `adb logcat | grep -i "\[auto"`.
@@ -265,11 +345,16 @@ its old config/parser until restarted).
 ## Tests
 
 ```bash
-cd backend && mvn test      # 77 tests — JUnit 5 + MockMvc + SSE integration
-cd app && npm test          # 158 tests — Vitest + jsdom + Testing Library
+cd backend && mvn test            # 91 tests — JUnit 5 + MockMvc + SSE integration
+cd app && npm test                # 329 tests — Vitest + jsdom + Testing Library
 cd app && npm run typecheck && npm run build
-cd app && npm run test:e2e  # 10 Playwright end-to-end specs (dev server + stub backend)
+cd app && npm run test:e2e        # 10 Playwright web e2e specs (dev server + stub backend)
+cd app && npm run test:e2e:android  # Appium + WebdriverIO (UiAutomator2) on-device journeys
 ```
+
+The Android E2E suite (`app/e2e-android/`) and the demo APK (`npm run android:demo:build`, which builds
+with `VITE_DEMO=1` + the `MockAutomationEngine`) let you exercise the full journey on an emulator without
+live sites; the backend's `ANTHROPIC_STUB_MODE` provides deterministic offline reasoning for both.
 
 ## Safety posture (built-in)
 - **Human-in-the-loop only** for OTP & payment — no code path auto-fills either.

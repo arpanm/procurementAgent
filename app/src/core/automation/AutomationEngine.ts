@@ -86,6 +86,13 @@ export interface AutomationEngine {
   search(item: RequestedItem): Promise<void>;
   /** Read the best-matching product into a Quote (playbook first, Claude fallback). */
   readProduct(item: RequestedItem): Promise<Quote>;
+  /**
+   * Read a RANKED list of candidate products for the item (best first), each a full {@link Quote} with
+   * its own detail URL — the source of the in-app "choose a nearby SKU" picker. Optional: the WebView
+   * engine implements it via the vision top-N read; callers fall back to a single {@link readProduct}
+   * when it's absent (mocks/tests). The first element is the best match.
+   */
+  readProductCandidates?(item: RequestedItem): Promise<readonly Quote[]>;
   /** Add a SKU/qty to the cart. */
   addToCart(skuId: string, qty: number): Promise<void>;
   /**

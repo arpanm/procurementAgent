@@ -62,6 +62,15 @@ export type ModifyChange =
       readonly canonicalItemId: string;
       readonly itemName: string;
       readonly platform: PlatformId;
+    }
+  | {
+      // Pick a specific candidate SKU (from the in-app "choose a nearby SKU" picker). Replaces the
+      // chosen quote for that platform+item with the picked candidate AND pins that platform.
+      readonly kind: "select-sku";
+      readonly canonicalItemId: string;
+      readonly itemName: string;
+      readonly platform: PlatformId;
+      readonly skuId: string;
     };
 
 /** The complete, serialisable session state held in the observable store. */
@@ -73,6 +82,12 @@ export interface SessionState {
   readonly items: readonly RequestedItem[];
   /** Quotes collected so far, deduped by platform+SKU. */
   readonly quotes: readonly Quote[];
+  /**
+   * Ranked candidate SKUs per canonical item (best first), across platforms — the source of the in-app
+   * "choose a nearby SKU" picker. Distinct from {@link quotes}, which holds only the CHOSEN quote per
+   * platform+item that the optimizer runs against.
+   */
+  readonly candidatesByItem: Readonly<Record<string, readonly Quote[]>>;
   /** Latest optimizer result, or null before the first optimize. */
   readonly allocation: Allocation | null;
   /** Pinned platform per canonical item from a swap-platform edit (forces the next optimize). */
@@ -93,6 +108,11 @@ export type OrchestratorEvent =
   | { readonly type: "SessionStarted"; readonly request: ProcurementRequest }
   | { readonly type: "PlanReady"; readonly items: readonly RequestedItem[] }
   | { readonly type: "QuoteCollected"; readonly quote: Quote }
+  | {
+      readonly type: "CandidatesCollected";
+      readonly canonicalItemId: string;
+      readonly candidates: readonly Quote[];
+    }
   | { readonly type: "PinsSeeded"; readonly pins: Readonly<Record<string, PlatformId>> }
   | { readonly type: "OptimizeStarted" }
   | { readonly type: "Optimized"; readonly allocation: Allocation }
@@ -112,6 +132,7 @@ export function initialState(sessionId: string): SessionState {
     request: null,
     items: [],
     quotes: [],
+    candidatesByItem: {},
     allocation: null,
     pins: {},
     approved: false,
@@ -119,6 +140,15 @@ export function initialState(sessionId: string): SessionState {
     error: null,
     version: 0,
   };
+}
+
+/** Shallow equality of two candidate lists by platform+SKU+price (to skip no-op CandidatesCollected). */
+function sameQuoteList(a: readonly Quote[], b: readonly Quote[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((q, i) => {
+    const o = b[i];
+    return q.platform === o.platform && q.skuId === o.skuId && q.pricePaise === o.pricePaise;
+  });
 }
 
 /** Upsert a quote keyed by platform+SKU so re-reads replace rather than duplicate. */
@@ -134,27 +164,60 @@ function upsertQuote(quotes: readonly Quote[], quote: Quote): readonly Quote[] {
   return next;
 }
 
-/** Apply a modify edit to the working demand + pins. Pure. */
+/** Replace the chosen quote for a platform+item with `picked` (drops any prior SKU for that pair). */
+function replaceChosenQuote(
+  quotes: readonly Quote[],
+  picked: Quote,
+): readonly Quote[] {
+  const kept = quotes.filter(
+    (q) =>
+      !(q.platform === picked.platform && q.canonicalItemId === picked.canonicalItemId),
+  );
+  return [...kept, picked];
+}
+
+/** Apply a modify edit to the working demand + pins (+ quotes for an SKU pick). Pure. */
 function applyModify(
   state: SessionState,
   change: ModifyChange,
-): Pick<SessionState, "items" | "pins"> {
+): Pick<SessionState, "items" | "pins" | "quotes"> {
   switch (change.kind) {
     case "change-qty": {
       const qty = Math.max(0, Math.round(change.qty));
       const items = state.items.map((item) =>
         item.name === change.itemName ? { ...item, qty } : item,
       );
-      return { items, pins: state.pins };
+      return { items, pins: state.pins, quotes: state.quotes };
     }
     case "drop-item": {
       const items = state.items.filter((item) => item.name !== change.itemName);
-      return { items, pins: state.pins };
+      return { items, pins: state.pins, quotes: state.quotes };
     }
     case "swap-platform": {
       return {
         items: state.items,
         pins: { ...state.pins, [change.canonicalItemId]: change.platform },
+        quotes: state.quotes,
+      };
+    }
+    case "select-sku": {
+      // Find the picked candidate among the stored ranked alternatives for this item.
+      const picked = (state.candidatesByItem[change.canonicalItemId] ?? []).find(
+        (q) => q.platform === change.platform && q.skuId === change.skuId,
+      );
+      if (!picked) {
+        // Unknown SKU (stale UI) — no-op beyond pinning the platform the user chose.
+        return {
+          items: state.items,
+          pins: { ...state.pins, [change.canonicalItemId]: change.platform },
+          quotes: state.quotes,
+        };
+      }
+      return {
+        items: state.items,
+        // Selecting a SKU on a platform also pins that platform for the item.
+        pins: { ...state.pins, [change.canonicalItemId]: change.platform },
+        quotes: replaceChosenQuote(state.quotes, picked),
       };
     }
   }
@@ -220,6 +283,25 @@ function reduce(state: SessionState, event: SessionEvent): SessionState {
     case "QuoteRead":
       return { ...state, quotes: upsertQuote(state.quotes, event.quote) };
 
+    // Ranked candidate SKUs for an item, for the in-app picker. Replaces the prior list for that item
+    // (a re-read supersedes it). No status change — it's metadata that rides alongside the quotes.
+    case "CandidatesCollected": {
+      if (TERMINAL.has(state.status)) {
+        return state;
+      }
+      const prev = state.candidatesByItem[event.canonicalItemId];
+      if (prev && sameQuoteList(prev, event.candidates)) {
+        return state;
+      }
+      return {
+        ...state,
+        candidatesByItem: {
+          ...state.candidatesByItem,
+          [event.canonicalItemId]: event.candidates,
+        },
+      };
+    }
+
     // Seed default per-item platform picks (best ₹/unit) before the first optimize. Merges into pins
     // WITHOUT changing status (it's a default, not a user edit); user swap-platform edits still win
     // because they arrive later. Only meaningful before approval.
@@ -265,8 +347,8 @@ function reduce(state: SessionState, event: SessionEvent): SessionState {
       if (state.status !== "awaiting_approval" && state.status !== "optimizing") {
         return state;
       }
-      const { items, pins } = applyModify(state, event.change);
-      return { ...state, status: "modifying", items, pins, approved: false };
+      const { items, pins, quotes } = applyModify(state, event.change);
+      return { ...state, status: "modifying", items, pins, quotes, approved: false };
     }
 
     // Cart hand-off complete: all platforms staged (best-effort add-to-cart). There is no order

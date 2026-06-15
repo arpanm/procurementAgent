@@ -22,14 +22,19 @@ import type { AutomationEngine } from "../../core/automation/AutomationEngine";
 import { MockAutomationEngine } from "../../core/automation/__mocks__/MockAutomationEngine";
 import { createEngine } from "../../core/adapters";
 import { CheckoutDriver } from "../../core/checkout/CheckoutDriver";
+import { agentForEngine } from "../../core/agents/AgentRegistry";
+import { DefaultKnowledgeStore } from "../../core/knowledge/PlatformKnowledgeStore";
+import { SiteMemory } from "../../core/knowledge/siteMemory";
 import { defaultPlatformPins } from "../../core/optimizer/defaultSelection";
 import { AuditLog } from "../../core/audit/AuditLog";
 import { InMemorySecureStore } from "../../core/secure/SecureStore";
 import type { DomainEvent } from "../../core/automation/events";
-import { BACKEND_BASE_URLS, PLATFORM_CART_URLS, PLATFORM_URLS } from "../../core/config";
+import { ACTIVE_PLATFORMS, BACKEND_BASE_URLS, PLATFORM_CART_URLS, PLATFORM_URLS } from "../../core/config";
 import { isAutomationDebug, traceAutomation } from "../../core/debug/automationDebug";
 import { useSyncExternalStore } from "react";
+import { allLoginsConfirmed } from "../../core/auth/loginStore";
 import { ChatPage } from "./ChatPage";
+import { LoginGate } from "./LoginGate";
 import { ComparisonPage } from "./ComparisonPage";
 import { OtpPaymentPage } from "./OtpPaymentPage";
 import { OrderSummaryPage } from "./OrderSummaryPage";
@@ -43,7 +48,18 @@ interface PendingHitl {
   readonly amountPaise?: number;
 }
 
-const QUOTE_PLATFORMS: readonly PlatformId[] = ["hyperpure", "amazon"];
+/** The platforms this run sources from — driven by {@link ACTIVE_PLATFORMS} (Amazon currently disabled). */
+const QUOTE_PLATFORMS: readonly PlatformId[] = ACTIVE_PLATFORMS;
+
+/** Human label per platform for loading copy/pills. */
+const PLATFORM_LABEL: Record<PlatformId, string> = {
+  hyperpure: "Hyperpure",
+  amazon: "Amazon.in",
+};
+
+/** "Hyperpure" / "Hyperpure and Amazon.in" — the active platforms joined for status copy. */
+const ACTIVE_PLATFORMS_LABEL = QUOTE_PLATFORMS.map((p) => PLATFORM_LABEL[p]).join(" and ");
+const CHECKING_PRICES_MSG = `Checking prices on ${ACTIVE_PLATFORMS_LABEL}…`;
 
 /** Branded full-screen loading state with step text, platform pills, and skeleton placeholders. */
 function Busy({
@@ -69,14 +85,12 @@ function Busy({
           </div>
           {showPlatforms ? (
             <div className="pc-loading__platforms">
-              <span className="pc-platform-pill pc-platform-pill--hyperpure">
-                <span className="pc-platform__dot" />
-                Hyperpure
-              </span>
-              <span className="pc-platform-pill pc-platform-pill--amazon">
-                <span className="pc-platform__dot" />
-                Amazon.in
-              </span>
+              {QUOTE_PLATFORMS.map((p) => (
+                <span key={p} className={`pc-platform-pill pc-platform-pill--${p}`}>
+                  <span className="pc-platform__dot" />
+                  {PLATFORM_LABEL[p]}
+                </span>
+              ))}
             </div>
           ) : null}
         </div>
@@ -201,9 +215,16 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
   );
   const intentClient = useMemo(() => new IntentClient(backend), [backend]);
   const audit = useMemo(() => new AuditLog(new InMemorySecureStore()), []);
+  // Guided-RAG knowledge: curated per-platform policies/hints that steer each agent. Uses safe built-in
+  // defaults (offline-safe); the backend `/knowledge` endpoint is the source of truth a transport can add.
+  const knowledgeStore = useMemo(() => new DefaultKnowledgeStore(), []);
 
   const bridgeRef = useRef<InAppBrowserBridge | null>(null);
   const enginesRef = useRef<Map<PlatformId, AutomationEngine>>(new Map());
+  // One learned, persistent site-memory per platform (localStorage-backed), shared across the pricing
+  // and checkout loops so a URL/locator learned while quoting is reused when adding to cart. Demo mode
+  // gets none (no real sites to learn from).
+  const memoriesRef = useRef<Map<PlatformId, SiteMemory>>(new Map());
   const humanResolverRef = useRef<(() => void) | null>(null);
   const checkoutStartedRef = useRef(false);
 
@@ -211,6 +232,11 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const [attempts, setAttempts] = useState<OrderAttempt[]>([]);
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
+  // First-run sign-in gate: the user must manually log in to each active platform once (persisted in
+  // localStorage). Demo mode skips it (no real sites). Until ready, the chat is gated behind LoginGate.
+  const [loginReady, setLoginReady] = useState<boolean>(
+    () => isDemo || allLoginsConfirmed(QUOTE_PLATFORMS),
+  );
 
   const state = useSyncExternalStore(orchestrator.subscribe, orchestrator.getState);
 
@@ -263,6 +289,19 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
     [makeEngine],
   );
 
+  /** The shared per-platform site memory (undefined in demo mode — nothing real to learn from). */
+  const memoryFor = useCallback(
+    (platform: PlatformId): SiteMemory | undefined => {
+      if (isDemo) return undefined;
+      const existing = memoriesRef.current.get(platform);
+      if (existing) return existing;
+      const memory = new SiteMemory(platform);
+      memoriesRef.current.set(platform, memory);
+      return memory;
+    },
+    [isDemo],
+  );
+
   // ---- Phase 1: parse confirmed → collect quotes on each platform → optimize ----
   const startProcurement = useCallback(
     async (items: readonly RequestedItem[]) => {
@@ -274,7 +313,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
       setBusyMessage("Planning your order…");
       await orchestrator.start(request);
 
-      setBusyMessage("Checking prices on Hyperpure and Amazon…");
+      setBusyMessage(CHECKING_PRICES_MSG);
       // In automation-debug mode show the live WebView so you can watch the scrape; otherwise hidden.
       const showWebView = isAutomationDebug();
       const br = bridge();
@@ -326,16 +365,30 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
             }
           }
 
-          setBusyMessage("Checking prices on Hyperpure and Amazon…");
+          setBusyMessage(CHECKING_PRICES_MSG);
+          // Route reads through the per-platform agent: Amazon opens the product detail page for the TRUE
+          // buybox price (not the noisy listing tile); Hyperpure uses its working listing+vision read. The
+          // demo mock engine resolves to a LegacyAgent so the demo journey is unchanged. The agent is
+          // guided by the platform's knowledge doc (policies/hints).
+          const knowledge = await knowledgeStore.getKnowledge(platform);
+          const agent = agentForEngine(platform, engine, {
+            hidden: !showWebView,
+            knowledge,
+            memory: memoryFor(platform),
+          });
           for (const item of orchestrator.getState().items) {
             try {
-              await engine.search(item);
-              const quote = await engine.readProduct(item);
-              orchestrator.recordQuote(quote);
+              await agent.search(item);
+              const { chosen, candidates } = await agent.readQuote(item);
+              orchestrator.recordQuote(chosen);
+              // Stash the ranked alternatives so the Comparison page can offer an in-app "choose a
+              // nearby SKU" picker when the default is only an approximate (nearby) match.
+              orchestrator.recordCandidates(chosen.canonicalItemId, candidates);
               quotesCollected += 1;
               traceAutomation(
                 "info",
-                `✓ "${item.name}" → ₹${(quote.pricePaise / 100).toFixed(2)} inStock=${quote.inStock}`,
+                `✓ "${item.name}" → ₹${(chosen.pricePaise / 100).toFixed(2)} inStock=${chosen.inStock}` +
+                  ` (${candidates.length} candidate(s))`,
                 platform,
               );
             } catch (err) {
@@ -377,7 +430,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
       traceAutomation("think", "optimization complete");
       setBusyMessage(null);
     },
-    [engineFor, orchestrator],
+    [engineFor, orchestrator, knowledgeStore, memoryFor],
   );
 
   // ---- Phase 2 (after explicit approval): drive checkout per platform ----
@@ -421,8 +474,15 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         }
       }
       const engine = engineFor(platformAllocation.platform);
+      const knowledge = await knowledgeStore.getKnowledge(platformAllocation.platform);
+      const agent = agentForEngine(platformAllocation.platform, engine, {
+        hidden: !showWebView,
+        knowledge,
+        memory: memoryFor(platformAllocation.platform),
+      });
       const driver = new CheckoutDriver({
         engine,
+        agent,
         backend,
         audit,
         onEvent,
@@ -471,7 +531,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
     // Staging emits no OrderPlaced, so explicitly move the session to its terminal success state and
     // render the summary (with the per-platform "Review & checkout" hand-off).
     orchestrator.finishCheckout();
-  }, [audit, backend, engineFor, orchestrator]);
+  }, [audit, backend, engineFor, orchestrator, knowledgeStore, memoryFor]);
 
   // Hand-off: bring the platform's cart to the foreground (logged-in session) so the user can review
   // quantities/variants and complete checkout manually. Re-opens the cart URL fresh and shows it.
@@ -492,6 +552,52 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
       }
     },
     [engineFor],
+  );
+
+  // Hand-off for a line the agent could NOT add automatically: open its product detail page in the
+  // foreground so the user can add it themselves (the model the user asked for on Amazon failures).
+  const openProductForAdd = useCallback(
+    async (platform: PlatformId, productUrl: string): Promise<void> => {
+      try {
+        const engine = engineFor(platform);
+        traceAutomation("think", `opening product to add manually: ${productUrl}`, platform);
+        await engine.open(productUrl, { hidden: false });
+        await engine.show();
+      } catch (err) {
+        traceAutomation(
+          "warn",
+          `could not open product: ${err instanceof Error ? err.message : String(err)}`,
+          platform,
+        );
+      }
+    },
+    [engineFor],
+  );
+
+  // First-run sign-in: foreground the platform's WebView so the user can log in + set their delivery
+  // location. Resolves when they close it; the user then explicitly confirms in the LoginGate.
+  const openLoginFor = useCallback(
+    async (platform: PlatformId): Promise<void> => {
+      const url = PLATFORM_URLS[platform];
+      const br = bridge();
+      try {
+        if (br.openLoginSession) {
+          await br.openLoginSession(platform, url);
+        } else {
+          // Web/demo fallback: open the engine visibly; the user confirms manually afterwards.
+          const engine = engineFor(platform);
+          await engine.open(url, { hidden: false });
+          await engine.show?.();
+        }
+      } catch (err) {
+        traceAutomation(
+          "warn",
+          `login open failed: ${err instanceof Error ? err.message : String(err)}`,
+          platform,
+        );
+      }
+    },
+    [bridge, engineFor],
   );
 
   useEffect(() => {
@@ -545,6 +651,17 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
     );
   }
 
+  // Gate everything behind the one-time manual sign-in (only relevant on the pre-procurement screens).
+  if (!loginReady && (state.status === "idle" || state.status === "cancelled")) {
+    return (
+      <LoginGate
+        platforms={QUOTE_PLATFORMS}
+        onOpenLogin={openLoginFor}
+        onReady={() => setLoginReady(true)}
+      />
+    );
+  }
+
   switch (state.status) {
     case "awaiting_approval":
     case "modifying":
@@ -554,7 +671,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
     case "optimizing":
       return (
         <Busy
-          message="Checking prices on Hyperpure and Amazon…"
+          message={CHECKING_PRICES_MSG}
           title="Finding your best price"
           showPlatforms
           showSkeletons
@@ -571,6 +688,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         <OrderSummaryPage
           attempts={attempts}
           onOpenCart={(platform) => void openCartForReview(platform)}
+          onOpenProduct={(platform, url) => void openProductForAdd(platform, url)}
         />
       );
     case "failed":

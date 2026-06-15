@@ -130,6 +130,9 @@ describe("Hyperpure adapter", () => {
     expect(quote.skuId).toBe("HP-PANEER-1KG");
     expect(quote.inStock).toBe(false);
     expect(quote.pricePaise).toBe(38500);
+    // Title/pack are still extracted on an out-of-stock tile — only `inStock` flips.
+    expect(quote.title).toBe("Amul Malai Paneer 1kg");
+    expect(quote.packSize).toBe("1kg");
   });
 
   it("checkout detects credit, OTP and payment", async () => {
@@ -158,6 +161,104 @@ describe("Hyperpure adapter", () => {
       makeBackend(),
     ).checkout();
     expect(pay.kind).toBe("needs_payment");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PHASE 0b REGRESSION LOCK — pin the EXACT current Hyperpure extraction output
+// for every recorded fixture SKU. The per-platform-agent refactor MUST keep
+// these values byte-for-byte identical; any drift is a behaviour change.
+// Values captured from the current production extraction pipeline
+// (selectors → buildQuoteDraft → WebViewAutomationEngine.buildQuote).
+// ---------------------------------------------------------------------------
+describe("Hyperpure adapter — recorded-fixture Quote contract (pre-refactor lock)", () => {
+  const EXPECTED = [
+    {
+      item: onion,
+      skuId: "HP-ONION-10KG", // last non-ref path segment of /hp/p/HP-ONION-10KG
+      canonicalItemId: "onion",
+      title: "Fresh Red Onion 10kg",
+      pricePaise: 25000,
+      mrpPaise: undefined,
+      packSize: "10kg", // parsed from the title (no space, as listed)
+      inStock: true,
+      productUrl: "http://localhost:3000/hp/p/HP-ONION-10KG",
+      deliveryDate: "Tomorrow",
+    },
+    {
+      item: paneer,
+      skuId: "HP-PANEER-1KG",
+      canonicalItemId: "paneer",
+      title: "Amul Malai Paneer 1kg",
+      pricePaise: 38500,
+      mrpPaise: undefined,
+      packSize: "1kg",
+      inStock: true,
+      productUrl: "http://localhost:3000/hp/p/HP-PANEER-1KG",
+      deliveryDate: "Today",
+    },
+    {
+      item: oil,
+      skuId: "HP-OIL-5L",
+      canonicalItemId: "refined oil",
+      title: "Fortune Refined Oil 5L Carton",
+      pricePaise: 115000,
+      mrpPaise: undefined,
+      packSize: "5L",
+      inStock: true,
+      productUrl: "http://localhost:3000/hp/p/HP-OIL-5L",
+      deliveryDate: "Tomorrow",
+    },
+  ] as const;
+
+  it.each(EXPECTED)(
+    "locks the full Quote for $skuId",
+    async ({ item, ...want }) => {
+      mountFixture(HP_SEARCH_RESULTS);
+      const engine = createEngine("hyperpure", new MockBridge({ doc: document }), makeBackend());
+
+      const quote = await engine.readProduct(item);
+
+      expect(quote.platform).toBe("hyperpure");
+      expect(quote.skuId).toBe(want.skuId);
+      expect(quote.canonicalItemId).toBe(want.canonicalItemId);
+      expect(quote.title).toBe(want.title);
+      expect(quote.pricePaise).toBe(want.pricePaise);
+      expect(quote.mrpPaise).toBe(want.mrpPaise);
+      expect(quote.packSize).toBe(want.packSize);
+      expect(quote.inStock).toBe(want.inStock);
+      expect(quote.productUrl).toBe(want.productUrl);
+      expect(quote.deliveryDate).toBe(want.deliveryDate);
+      expect(quote.movPaise).toBeUndefined();
+      expect(quote.stockCap).toBeUndefined();
+      expect(quote.deliveryFeePaise).toBeUndefined();
+      expect(typeof quote.readAt).toBe("string");
+    },
+  );
+
+  // The out-of-stock tile is a SEPARATE recorded fixture and a distinct extraction path (only `inStock`
+  // flips; title/price/pack/url/delivery are still read). Lock its FULL Quote so the refactor can't
+  // regress out-of-stock extraction either.
+  it("locks the full Quote for the out-of-stock paneer tile", async () => {
+    mountFixture(HP_OUT_OF_STOCK);
+    const engine = createEngine("hyperpure", new MockBridge({ doc: document }), makeBackend());
+
+    const quote = await engine.readProduct(paneer);
+
+    expect(quote.platform).toBe("hyperpure");
+    expect(quote.skuId).toBe("HP-PANEER-1KG");
+    expect(quote.canonicalItemId).toBe("paneer");
+    expect(quote.title).toBe("Amul Malai Paneer 1kg");
+    expect(quote.pricePaise).toBe(38500);
+    expect(quote.mrpPaise).toBeUndefined();
+    expect(quote.packSize).toBe("1kg");
+    expect(quote.inStock).toBe(false); // "Out of stock" → out of stock
+    expect(quote.productUrl).toBe("http://localhost:3000/hp/p/HP-PANEER-1KG");
+    expect(quote.deliveryDate).toBe("Today");
+    expect(quote.movPaise).toBeUndefined();
+    expect(quote.stockCap).toBeUndefined();
+    expect(quote.deliveryFeePaise).toBeUndefined();
+    expect(typeof quote.readAt).toBe("string");
   });
 });
 

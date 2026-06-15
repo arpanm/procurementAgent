@@ -55,7 +55,7 @@ export function __setAutomationDebugForTests(value: boolean | null): void {
   cachedEnabled = value;
 }
 
-const MAX_ENTRIES = 400;
+const MAX_ENTRIES = 2000;
 const entries: AutomationTraceEntry[] = [];
 const listeners = new Set<() => void>();
 let seq = 0;

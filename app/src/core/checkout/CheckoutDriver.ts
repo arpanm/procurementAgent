@@ -31,8 +31,11 @@ import type {
   PlatformAllocation,
   PlatformId,
   RequestedItem,
+  StagedLine,
 } from "../domain/types";
 import type { AuditLog } from "../audit/AuditLog";
+import type { PlatformAgent } from "../agents/PlatformAgent";
+import { LegacyAgent } from "../agents/LegacyAgent";
 import { InMemorySecureStore } from "../secure/SecureStore";
 import { VerifierClient } from "./VerifierClient";
 import { IdempotencyStore, newIdempotencyKey } from "./idempotency";
@@ -66,6 +69,12 @@ export interface CheckoutDriverDeps {
    * "Review & checkout on {platform}" hand-off.
    */
   readonly cartUrl?: string;
+  /**
+   * The per-platform agent that performs the actual cart-add for {@link stageCart} (AmazonAgent confirms
+   * a native add; HyperpureAgent uses the live DOM add). When omitted, a behavior-neutral
+   * {@link LegacyAgent} wrapping `engine` is used, so engine-only callers/tests keep working unchanged.
+   */
+  readonly agent?: PlatformAgent;
   /** Sink for domain events; wire `orchestrator.ingest` to fold them into the session. */
   readonly onEvent?: DomainEventListener;
   /** Override the verifier (e.g. with a price tolerance); defaults to one wrapping `backend`. */
@@ -88,6 +97,7 @@ export class CheckoutDriver {
   private readonly productUrls: ReadonlyMap<string, string>;
   private readonly showWebView: boolean;
   private readonly cartUrl?: string;
+  private readonly agent?: PlatformAgent;
   private readonly onEvent?: DomainEventListener;
   private readonly verifier: VerifierClient;
   private readonly idempotency: IdempotencyStore;
@@ -103,6 +113,7 @@ export class CheckoutDriver {
     this.productUrls = deps.productUrls ?? new Map();
     this.showWebView = deps.showWebView ?? false;
     this.cartUrl = deps.cartUrl;
+    this.agent = deps.agent;
     this.onEvent = deps.onEvent;
     this.verifier = deps.verifier ?? new VerifierClient(deps.backend);
     this.idempotency =
@@ -309,17 +320,40 @@ export class CheckoutDriver {
       at: startedAt,
     });
 
+    // The agent owns the actual add (AmazonAgent: open detail page + native add + confirm; HyperpureAgent:
+    // live DOM add). When no agent is injected (engine-only callers/tests), fall back to a LegacyAgent that
+    // reproduces the prior open/search-then-add behavior over the engine.
+    const agent =
+      this.agent ??
+      new LegacyAgent({
+        session: this.engine,
+        cartUrl: this.cartUrl,
+        hidden: !this.showWebView,
+      });
+
+    const stagedLines: StagedLine[] = [];
     let added = 0;
     for (const line of allocation.lines) {
-      try {
-        const productUrl = this.productUrls.get(line.canonicalItemId);
-        if (productUrl) {
-          await this.engine.open(productUrl, { hidden: !this.showWebView });
-        } else {
-          const item = this.itemsById.get(line.canonicalItemId);
-          if (item) await this.engine.search(item);
-        }
-        await this.engine.addToCart(line.skuId, line.qty);
+      const productUrl = this.productUrls.get(line.canonicalItemId);
+      const item = this.itemsById.get(line.canonicalItemId);
+      const result = await agent.addToCart({
+        skuId: line.skuId,
+        qty: line.qty,
+        productUrl,
+        item,
+      });
+      const resolvedUrl = result.productUrl ?? productUrl;
+      stagedLines.push({
+        canonicalItemId: line.canonicalItemId,
+        itemName: line.itemName,
+        skuId: line.skuId,
+        qty: line.qty,
+        status: result.status,
+        productUrl: resolvedUrl,
+        reason: result.reason,
+      });
+
+      if (result.status === "added") {
         added += 1;
         await this.audit.append({
           actor: "agent",
@@ -327,15 +361,11 @@ export class CheckoutDriver {
           after: { platform, skuId: line.skuId, qty: line.qty, via: productUrl ? "product-url" : "search" },
           at: this.now(),
         });
-      } catch (addErr) {
+      } else {
         await this.audit.append({
           actor: "agent",
           action: "cart:add-failed",
-          after: {
-            platform,
-            skuId: line.skuId,
-            reason: addErr instanceof Error ? addErr.message : String(addErr),
-          },
+          after: { platform, skuId: line.skuId, reason: result.reason ?? "add failed", productUrl: resolvedUrl },
           at: this.now(),
         });
       }
@@ -358,6 +388,7 @@ export class CheckoutDriver {
       updatedAt: this.now(),
       cartUrl: this.cartUrl,
       stagedLineCount: added,
+      stagedLines,
     };
   }
 

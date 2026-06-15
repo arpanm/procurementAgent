@@ -20,7 +20,8 @@ import {
  * site-internal logs (Hyperpure's rail logger, Datadog SDK, mixed-content image blocks) irrelevant to
  * our bridge/automation diagnostics.
  */
-const CONSOLE_NOISE_RE = /hp-web-service|Datadog Browser SDK|Mixed Content|RUM data will be collected/i;
+const CONSOLE_NOISE_RE =
+  /hp-web-service|Datadog Browser SDK|Mixed Content|RUM data will be collected|Refused to set unsafe header/i;
 
 /** Split `s` on `sep` into at most `max` parts; the final part keeps any remaining separators. */
 function splitN(s: string, sep: string, max: number): string[] {
@@ -397,6 +398,25 @@ export class CapgoBridge extends AbstractBridge {
   }
 
   async open(id: string, url: string, hidden: boolean): Promise<void> {
+    // Reuse the live native webview for this logical id by navigating it (setUrl) instead of opening a
+    // brand-new window on every search / Claude `navigate`. Opening repeatedly stacks orphaned webviews
+    // that are never closed — the "multiple Hyperpure screens, none closing" bug. Fall back to a fresh
+    // openWebView if the existing one is gone (e.g. user closed it) so the flow still recovers.
+    const existing = this.idMap.get(id);
+    if (existing) {
+      try {
+        await this.plugin.setUrl({ id: existing, url });
+        if (isAutomationDebug()) await this.injectProbe(id);
+        return;
+      } catch (err) {
+        traceAutomation(
+          "warn",
+          `reuse via setUrl failed (${err instanceof Error ? err.message : String(err)}); opening a fresh webview`,
+          this.logicalIdFor(existing),
+        );
+        this.idMap.delete(id);
+      }
+    }
     const res = await this.plugin.openWebView({ url, hidden, ...this.openOptions() });
     if (res && typeof res.id === "string") this.idMap.set(id, res.id);
     if (isAutomationDebug()) {

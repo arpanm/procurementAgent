@@ -192,6 +192,50 @@ describe("ComparisonPage", () => {
     await waitFor(() => expect(optimize).toHaveBeenCalledTimes(2));
   });
 
+  it("offers the nearby-SKU picker for an approximate default and selecting a SKU re-optimizes", async () => {
+    const optimize = vi
+      .fn()
+      .mockResolvedValueOnce(allocation(42000))
+      .mockResolvedValueOnce(allocation(40000));
+    const orch = new Orchestrator(makeBackend(optimize as unknown as BackendClient["optimize"]), {
+      sessionId: "s1",
+      retryDelayMs: 0,
+    });
+    await orch.start(REQUEST);
+    const chosen: Quote = {
+      platform: "hyperpure",
+      skuId: "mm-1kg",
+      canonicalItemId: "potato",
+      title: "Milky Mist Paneer 1 Kg",
+      pricePaise: 42000,
+      packSize: "1 Kg",
+      inStock: true,
+      matchKind: "nearby",
+      readAt: "2026-01-01T00:00:00.000Z",
+    };
+    const alt: Quote = { ...chosen, skuId: "amul-1kg", title: "Amul Paneer 1 Kg", pricePaise: 40000 };
+    orch.recordQuote(chosen);
+    orch.recordCandidates("potato", [chosen, alt]);
+    await orch.optimize();
+
+    render(<ComparisonPage orchestrator={orch} />);
+
+    // The approximate-match toggle is shown; expand it to reveal candidate SKUs.
+    const toggle = screen.getByTestId("picker-toggle-potato");
+    expect(toggle).toHaveTextContent("Approximate match");
+    fireEvent.click(toggle);
+
+    // Selecting the alternate SKU dispatches a select-sku modify (re-optimizes).
+    fireEvent.click(screen.getByTestId("candidate-potato-amul-1kg"));
+    await waitFor(() => expect(optimize).toHaveBeenCalledTimes(2));
+  });
+
+  it("does NOT show the nearby-SKU picker when the default is an exact match", async () => {
+    const orch = await atApproval(async () => allocation(12300)); // quote() has no matchKind (exact/unknown)
+    render(<ComparisonPage orchestrator={orch} />);
+    expect(screen.queryByTestId("picker-potato")).toBeNull();
+  });
+
   it("read back invokes the injected speak fn with the explanation", async () => {
     const orch = await atApproval(async () => allocation(12300));
     const speak = vi.fn();

@@ -90,6 +90,8 @@ export function ComparisonPage({
   const state = useSyncExternalStore(subscribe, getSnapshot);
 
   const [editing, setEditing] = useState(false);
+  /** Which item's "choose a nearby SKU" picker is currently expanded (only one open at a time). */
+  const [expandedPicker, setExpandedPicker] = useState<string | null>(null);
 
   const allocation = state.allocation ?? fallbackAllocation ?? null;
   const explanation = useMemo(
@@ -150,6 +152,34 @@ export function ComparisonPage({
     [orchestrator],
   );
 
+  /** The quote currently chosen for an item (on its selected platform), used to drive the picker. */
+  const selectedQuoteFor = useCallback(
+    (canonicalItemId: string): Quote | undefined => {
+      const platform = selectedPlatformFor(canonicalItemId);
+      if (!platform) {
+        return undefined;
+      }
+      return state.quotes.find(
+        (q) => q.canonicalItemId === canonicalItemId && q.platform === platform,
+      );
+    },
+    [selectedPlatformFor, state.quotes],
+  );
+
+  /** Pick a specific candidate SKU from the in-app picker (re-optimizes + pins its platform). */
+  const handleSelectSku = useCallback(
+    (canonicalItemId: string, itemName: string, candidate: Quote) => {
+      void orchestrator.modify({
+        kind: "select-sku",
+        canonicalItemId,
+        itemName,
+        platform: candidate.platform,
+        skuId: candidate.skuId,
+      });
+    },
+    [orchestrator],
+  );
+
   const handleProceed = useCallback(() => {
     orchestrator.approve();
   }, [orchestrator]);
@@ -197,6 +227,126 @@ export function ComparisonPage({
       void orchestrator.modify({ kind: "drop-item", itemName: line.itemName });
     },
     [orchestrator],
+  );
+
+  /**
+   * The in-app "choose a nearby SKU" picker. Shown only when the item's DEFAULT pick is a NEARBY
+   * (approximate) match and there are ranked alternatives to offer — exactly the user's rule: auto-pick
+   * an exact brand+size match, only ask when there's none. Reuses the same choice-button styling as the
+   * per-platform chooser; selecting a candidate dispatches a `select-sku` modify (re-optimizes + pins).
+   */
+  const renderNearbyPicker = useCallback(
+    (item: RequestedItem, canonicalItemId: string): JSX.Element | null => {
+      const candidates = state.candidatesByItem[canonicalItemId] ?? [];
+      const selectedQuote = selectedQuoteFor(canonicalItemId);
+      // Only surface the picker for an approximate default with real alternatives to choose between.
+      if (selectedQuote?.matchKind !== "nearby" || candidates.length < 2) {
+        return null;
+      }
+      const expanded = expandedPicker === canonicalItemId;
+      return (
+        <div
+          data-testid={`picker-${canonicalItemId}`}
+          style={{ marginTop: "0.5rem", borderTop: "1px dashed rgba(var(--ion-text-color-rgb,0,0,0),0.12)", paddingTop: "0.5rem" }}
+        >
+          <button
+            type="button"
+            data-testid={`picker-toggle-${canonicalItemId}`}
+            aria-expanded={expanded}
+            disabled={decided}
+            onClick={() => setExpandedPicker(expanded ? null : canonicalItemId)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              width: "100%",
+              background: "transparent",
+              border: "none",
+              padding: "0.25rem 0",
+              cursor: decided ? "default" : "pointer",
+              color: "var(--ion-color-warning, #b26a00)",
+              fontSize: "0.8rem",
+              fontWeight: 600,
+            }}
+          >
+            <span>Approximate match — choose a different option ({candidates.length})</span>
+            <span aria-hidden>{expanded ? "▲" : "▼"}</span>
+          </button>
+          {expanded ? (
+            <div style={{ display: "grid", gap: "0.4rem", marginTop: "0.4rem" }}>
+              {candidates.map((cand) => {
+                const isSelected =
+                  selectedQuote?.platform === cand.platform &&
+                  selectedQuote?.skuId === cand.skuId;
+                const perLabel = perUnitLabel(cand);
+                return (
+                  <button
+                    type="button"
+                    key={cand.platform + cand.skuId}
+                    data-testid={`candidate-${canonicalItemId}-${cand.skuId}`}
+                    aria-pressed={isSelected}
+                    disabled={decided || !cand.inStock}
+                    onClick={() => handleSelectSku(canonicalItemId, item.name, cand)}
+                    className="pc-choice"
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "0.5rem 0.6rem",
+                      borderRadius: "10px",
+                      border: isSelected
+                        ? "2px solid var(--ion-color-primary)"
+                        : "1px solid rgba(var(--ion-text-color-rgb,0,0,0),0.12)",
+                      background: isSelected
+                        ? "rgba(var(--ion-color-primary-rgb),0.08)"
+                        : "transparent",
+                      opacity: cand.inStock ? 1 : 0.5,
+                      cursor: decided || !cand.inStock ? "default" : "pointer",
+                    }}
+                  >
+                    <span style={{ minWidth: 0 }}>
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: "0.82rem",
+                          fontWeight: 600,
+                          color: "var(--ion-text-color)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {PLATFORM_LABELS[cand.platform]} · {cand.title}
+                        {cand.inStock ? "" : " · out of stock"}
+                      </span>
+                      {cand.packSize ? (
+                        <span style={{ display: "block", fontSize: "0.74rem", color: "var(--ion-color-medium)" }}>
+                          {cand.packSize}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span style={{ textAlign: "right", flexShrink: 0 }}>
+                      <span style={{ display: "block", fontWeight: 700, color: "var(--ion-text-color)" }}>
+                        {formatRupees(cand.pricePaise)}
+                      </span>
+                      {perLabel ? (
+                        <span style={{ display: "block", fontSize: "0.72rem", color: "var(--ion-color-medium)" }}>
+                          {perLabel}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      );
+    },
+    [decided, expandedPicker, handleSelectSku, selectedQuoteFor, state.candidatesByItem],
   );
 
   const renderLineControls = useCallback(
@@ -429,6 +579,7 @@ export function ComparisonPage({
                           );
                         })}
                       </div>
+                      {renderNearbyPicker(item, canonicalItemId)}
                     </div>
                   );
                 })}

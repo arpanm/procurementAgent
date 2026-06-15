@@ -25,6 +25,11 @@ export interface OrderSummaryPageProps {
    * checkout. Provided for staged ("cart_filled") attempts; omitted in pure-display contexts (tests).
    */
   readonly onOpenCart?: (platform: PlatformId) => void;
+  /**
+   * Hand-off for a line the agent could NOT add automatically: open its product detail page in the
+   * foreground so the user can add it manually. Provided for staged attempts with failed lines.
+   */
+  readonly onOpenProduct?: (platform: PlatformId, productUrl: string) => void;
 }
 
 /** Success check glyph for the summary hero. */
@@ -42,7 +47,11 @@ function CheckGlyph(): JSX.Element {
   );
 }
 
-export function OrderSummaryPage({ attempts, onOpenCart }: OrderSummaryPageProps): JSX.Element {
+export function OrderSummaryPage({
+  attempts,
+  onOpenCart,
+  onOpenProduct,
+}: OrderSummaryPageProps): JSX.Element {
   const placed = attempts.filter((a) => a.status === "placed");
   const grandTotalPaise = placed.reduce((sum, a) => sum + a.totalPaise, 0);
   const allPlaced = attempts.length > 0 && placed.length === attempts.length;
@@ -89,25 +98,61 @@ export function OrderSummaryPage({ attempts, onOpenCart }: OrderSummaryPageProps
               </p>
             </div>
 
-            {staged.map((attempt) => (
-              <div className="pc-handoff-card" key={attempt.platform} data-testid={`staged-${attempt.platform}`}>
-                <h2 className="pc-handoff-card__platform">{platformLabel(attempt.platform)}</h2>
-                <p className="pc-handoff-card__prompt">
-                  {attempt.stagedLineCount ?? 0} item
-                  {(attempt.stagedLineCount ?? 0) === 1 ? "" : "s"} added · approx{" "}
-                  {formatRupees(attempt.totalPaise)}
-                </p>
-                <IonButton
-                  className="pc-cta"
-                  expand="block"
-                  data-testid={`review-${attempt.platform}`}
-                  disabled={!attempt.cartUrl || !onOpenCart}
-                  onClick={() => onOpenCart?.(attempt.platform)}
+            {staged.map((attempt) => {
+              const failedLines = (attempt.stagedLines ?? []).filter((l) => l.status === "failed");
+              return (
+                <div
+                  className="pc-handoff-card"
+                  key={attempt.platform}
+                  data-testid={`staged-${attempt.platform}`}
                 >
-                  Review &amp; checkout on {platformLabel(attempt.platform)}
-                </IonButton>
-              </div>
-            ))}
+                  <h2 className="pc-handoff-card__platform">{platformLabel(attempt.platform)}</h2>
+                  <p className="pc-handoff-card__prompt">
+                    {attempt.stagedLineCount ?? 0} item
+                    {(attempt.stagedLineCount ?? 0) === 1 ? "" : "s"} added · approx{" "}
+                    {formatRupees(attempt.totalPaise)}
+                  </p>
+
+                  {failedLines.length > 0 ? (
+                    <div
+                      className="pc-handoff-card__failed"
+                      data-testid={`staged-failed-${attempt.platform}`}
+                    >
+                      <IonNote color="warning">
+                        We couldn&apos;t add {failedLines.length} item
+                        {failedLines.length === 1 ? "" : "s"} automatically — open{" "}
+                        {failedLines.length === 1 ? "it" : "them"} to add manually:
+                      </IonNote>
+                      {failedLines.map((line) => (
+                        <IonButton
+                          key={line.canonicalItemId}
+                          fill="outline"
+                          expand="block"
+                          style={{ marginTop: "0.4rem" }}
+                          data-testid={`add-manually-${attempt.platform}-${line.canonicalItemId}`}
+                          disabled={!line.productUrl || !onOpenProduct}
+                          onClick={() =>
+                            line.productUrl && onOpenProduct?.(attempt.platform, line.productUrl)
+                          }
+                        >
+                          Open {line.itemName} ({line.qty})
+                        </IonButton>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <IonButton
+                    className="pc-cta"
+                    expand="block"
+                    data-testid={`review-${attempt.platform}`}
+                    disabled={!attempt.cartUrl || !onOpenCart}
+                    onClick={() => onOpenCart?.(attempt.platform)}
+                  >
+                    Review &amp; checkout on {platformLabel(attempt.platform)}
+                  </IonButton>
+                </div>
+              );
+            })}
 
             <div className="pc-grandtotal">
               <span className="pc-grandtotal__label">Estimated total</span>

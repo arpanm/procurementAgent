@@ -19,7 +19,7 @@ import type {
   Quote,
   RequestedItem,
 } from "../domain/types";
-import { parsePackSize } from "./packPricing";
+import { type PackSize, parsePackSize } from "./packPricing";
 
 /** The runtime `canonicalItemId` the backend stamps on each item (the TS type omits it). */
 function itemCanonicalId(item: RequestedItem): string {
@@ -28,14 +28,35 @@ function itemCanonicalId(item: RequestedItem): string {
 }
 
 /**
- * The reconciled pack count when (and only when) both the requested and sold pack sizes parse to the
- * same dimension — `ceil(item.qty × requestedPack / soldPack)`. Returns `undefined` when reconciliation
- * isn't possible (loose produce, unparseable size, dimension mismatch) so callers can leave the
- * existing quantity completely untouched rather than guessing.
+ * The TOTAL physical quantity the user asked for, reduced to a base unit (g / ml / count).
+ *
+ * Two cases:
+ *  - Packed request ("5 packets of 1 kg paneer"): qty is a COUNT of `packSize` packs → total = qty × pack.
+ *  - Loose request ("10 kg onion"): qty is ITSELF the amount in `unit` → total = parse("10 kg"). This is the
+ *    case that was missing, which made "10 kg onion" buy 10 packs of a 10 kg SKU (= 100 kg) instead of 1.
+ *
+ * Returns `undefined` only when neither the pack size nor the qty+unit parses to a measurable dimension.
+ */
+function requestedTotal(item: RequestedItem): PackSize | undefined {
+  const pack = parsePackSize(item.packSize);
+  if (pack) {
+    return { ...pack, baseQuantity: Math.max(1, item.qty) * pack.baseQuantity };
+  }
+  return parsePackSize(`${item.qty} ${item.unit}`);
+}
+
+/**
+ * The reconciled pack count when the requested TOTAL and the SOLD pack size parse to the same dimension —
+ * `ceil(totalRequested / soldPack)`. Works for both packed requests AND loose produce: "10 kg onion"
+ * against a "Onion (Big), 10 Kg" SKU → 1 pack; against a "Onion (Medium), 5 Kg" SKU → 2 packs. Returns
+ * `undefined` only when reconciliation truly isn't possible (unparseable sold size, dimension mismatch),
+ * so callers leave the existing quantity untouched rather than guessing.
  */
 export function reconciledPackCount(item: RequestedItem, quote: Quote): number | undefined {
-  const requested = parsePackSize(item.packSize);
-  const sold = parsePackSize(quote.packSize ?? quote.title);
+  const requested = requestedTotal(item);
+  // Prefer the explicit pack size, but fall back to the title (an empty-string packSize is not nullish,
+  // so `??` alone would wrongly stop at it and never read the size out of "Onion (Big), 10 Kg").
+  const sold = parsePackSize(quote.packSize) ?? parsePackSize(quote.title);
   if (
     requested &&
     sold &&
@@ -43,8 +64,7 @@ export function reconciledPackCount(item: RequestedItem, quote: Quote): number |
     sold.baseQuantity > 0 &&
     requested.baseQuantity > 0
   ) {
-    const totalNeeded = Math.max(1, item.qty) * requested.baseQuantity;
-    return Math.max(1, Math.ceil(totalNeeded / sold.baseQuantity));
+    return Math.max(1, Math.ceil(requested.baseQuantity / sold.baseQuantity));
   }
   return undefined;
 }
