@@ -11,7 +11,7 @@
  * reducer enforces that `approved`/`executing`/… are unreachable without an `Approved` event, and
  * {@link modify}/{@link cancel} never place an order — they only reshape demand or stop the session.
  */
-import type { BackendClient } from "../backend/BackendClient";
+import { BackendHttpError, type BackendClient } from "../backend/BackendClient";
 import type { Allocation, PlatformId, ProcurementRequest, Quote } from "../domain/types";
 import type { DomainEvent } from "../automation/events";
 import { OptimizerClient, type PlatformConstraint } from "../optimizer/OptimizerClient";
@@ -223,7 +223,14 @@ export class Orchestrator implements ReadableStore<SessionState> {
           await this.backend.appendEvent(this.sessionId, event);
           this.outbox.shift();
           break;
-        } catch {
+        } catch (err) {
+          // A 4xx (e.g. a 404 because the backend was restarted and no longer has this session) is
+          // permanent for an unchanged POST — don't retry it, that just spams the log N times per event.
+          // Drop it immediately; telemetry is best-effort and the local store stays correct regardless.
+          if (err instanceof BackendHttpError && err.isClientError) {
+            this.outbox.shift();
+            break;
+          }
           attempt += 1;
           if (attempt > this.maxRetries) {
             // Give up on this event so it can't wedge the queue; the local store stays correct.

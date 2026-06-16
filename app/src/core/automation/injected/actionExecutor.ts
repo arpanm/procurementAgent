@@ -19,7 +19,7 @@ export function executeAction(doc: Document, action: EngineAction): ActionResult
       if (!el) return { ok: false, reason: "stale-handle" };
       scrollIntoView(el);
       if (action.type === "click") {
-        (el as HTMLElement).click();
+        resolveClickTarget(el).click();
         return { ok: true };
       }
       if (action.type === "type") {
@@ -48,6 +48,32 @@ export function executeAction(doc: Document, action: EngineAction): ActionResult
       return { ok: false, reason: "unknown-action" };
     }
   }
+}
+
+/**
+ * The click handler is usually on the real `<button>`/`<a>`, but the serializer often hands us the
+ * surrounding tile/label element — clicking that fires nothing. Resolve to the nearest interactive node
+ * (self → interactive descendant → interactive ancestor) so the click lands on the actual control.
+ */
+function resolveClickTarget(el: Element): HTMLElement {
+  const interactive = (n: Element | null): n is HTMLElement => {
+    if (!n) return false;
+    if (/^(button|a|input|select|textarea)$/i.test(n.tagName)) return true;
+    const role = n.getAttribute("role");
+    if (role === "button" || role === "link") return true;
+    return n.hasAttribute("onclick");
+  };
+  if (interactive(el)) return el as HTMLElement;
+  const inner = el.querySelector?.(
+    'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"], [onclick]',
+  );
+  if (inner) return inner as HTMLElement;
+  let p: Element | null = el.parentElement;
+  while (p && p.tagName !== "BODY") {
+    if (interactive(p)) return p as HTMLElement;
+    p = p.parentElement;
+  }
+  return el as HTMLElement;
 }
 
 function scrollIntoView(el: Element): void {
@@ -133,13 +159,58 @@ export function buildActionScript(requestId: string, action: EngineAction): stri
   function post(r) {
     __hpEmit(RID, { requestId: RID, type: 'action', ok: !!r.ok, reason: r.reason || null });
   }
+  function isInteractive(n) {
+    if (!n || n.nodeType !== 1) return false;
+    if (/^(button|a|input|select|textarea)$/i.test(n.tagName)) return true;
+    var role = n.getAttribute && n.getAttribute('role');
+    if (role === 'button' || role === 'link') return true;
+    if (n.hasAttribute && n.hasAttribute('onclick')) return true;
+    if (n.tabIndex != null && n.tabIndex >= 0) return true;
+    return false;
+  }
+  // Hyperpure (and most React SPAs) attach the click handler to the real <button>; the serializer often
+  // captures the surrounding tile/label, so el.click() fired on the wrong node and the add silently no-op'd
+  // (the "ADD clicked, cart unchanged" bug). Resolve to the nearest interactive node before clicking.
+  function resolveTarget(n) {
+    if (isInteractive(n)) return n;
+    if (n.querySelector) {
+      var inner = n.querySelector('button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"], [onclick]');
+      if (inner) return inner;
+    }
+    var p = n.parentElement;
+    while (p && p !== document.body) {
+      if (isInteractive(p)) return p;
+      p = p.parentElement;
+    }
+    return n;
+  }
+  function robustClick(node) {
+    var t = resolveTarget(node);
+    try { if (t.scrollIntoView) t.scrollIntoView({ block: 'center' }); } catch (e0) {}
+    var r = (t.getBoundingClientRect && t.getBoundingClientRect()) || { left: 0, top: 0, width: 0, height: 0 };
+    var base = { bubbles: true, cancelable: true, composed: true, view: window,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+    try { if (t.focus) t.focus(); } catch (e1) {}
+    // Fire a full pointer+mouse gesture so handlers bound to pointerdown/mousedown also react, THEN a single
+    // native click (one click only — never both a synthetic 'click' event and .click(), to avoid double-add).
+    var gesture = [['pointerover', 1], ['pointerenter', 1], ['pointerdown', 1], ['mousedown', 0], ['pointerup', 1], ['mouseup', 0]];
+    gesture.forEach(function (g) {
+      try {
+        var isPtr = g[1] === 1;
+        var Ctor = isPtr && window.PointerEvent ? PointerEvent : MouseEvent;
+        var opts = isPtr ? Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, base) : base;
+        t.dispatchEvent(new Ctor(g[0], opts));
+      } catch (e2) {}
+    });
+    try { if (typeof t.click === 'function') t.click(); else t.dispatchEvent(new MouseEvent('click', base)); } catch (e3) {}
+  }
   try {
     if (a.type === 'click' || a.type === 'type' || a.type === 'select') {
       var el = document.querySelector('[data-pc-idx="' + a.idx + '"]');
       if (!el) { post({ ok: false, reason: 'stale-handle' }); return; }
       if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
       if (a.type === 'click') {
-        el.click();
+        robustClick(el);
       } else if (a.type === 'type') {
         var proto = Object.getPrototypeOf(el);
         var d = proto && Object.getOwnPropertyDescriptor(proto, 'value');

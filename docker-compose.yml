@@ -10,7 +10,7 @@ services:
       # Anthropic — leave STUB_MODE=true to run offline without a key.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_STUB_MODE: ${ANTHROPIC_STUB_MODE:-true}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-20250514}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
       ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-2048}

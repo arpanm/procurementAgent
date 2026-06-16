@@ -321,7 +321,17 @@ export class WebViewAutomationEngine implements AutomationEngine {
 
   /** Execute one action with the engine's retry/backoff and post-action settle. */
   async act(action: EngineAction): Promise<ActionResult> {
-    return this.executeWithRetry(action);
+    const result = await this.executeWithRetry(action);
+    // Let the page react (e.g. ADD → cart network round-trip + stepper swap) before the caller observes
+    // to confirm the effect — otherwise a same-tick read sees the pre-click DOM and reports a false fail.
+    if (result.ok) {
+      try {
+        await this.settle();
+      } catch {
+        /* best-effort: a settle timeout must not mask a successful action */
+      }
+    }
+    return result;
   }
 
   /** Capture a webview screenshot as a data URL, or null on failure (never throws). */

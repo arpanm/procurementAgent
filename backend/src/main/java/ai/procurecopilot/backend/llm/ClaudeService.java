@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 
 /**
  * The single entry point for all Anthropic reasoning (PROCURE_COPILOT_PLAN.md §3.2). Every payload
@@ -81,6 +82,21 @@ public class ClaudeService {
                     .timeout(Duration.ofSeconds(60))
                     .block();
             return extractText(raw);
+        } catch (WebClientResponseException e) {
+            // Make config/quota failures self-explanatory in the log instead of a bare stack trace: a 404
+            // here means the configured model id is retired/unavailable for this key — the exact outage
+            // that surfaced in-app as "could not source / nothing found" with no obvious cause.
+            String hint = switch (e.getStatusCode().value()) {
+                case 404 -> " — model '" + props.model()
+                        + "' not found for this API key; update ANTHROPIC_MODEL to a current model";
+                case 401, 403 -> " — API key rejected; check ANTHROPIC_API_KEY";
+                case 429 -> " — rate limited / quota exhausted; retry later or check billing";
+                default -> "";
+            };
+            log.error("Anthropic {} for task {}{} · body={}",
+                    e.getStatusCode(), request.task(), hint, e.getResponseBodyAsString());
+            throw new ClaudeException(
+                    "Anthropic " + e.getStatusCode() + " for task " + request.task() + hint, e);
         } catch (Exception e) {
             throw new ClaudeException("Anthropic call failed for task " + request.task(), e);
         }

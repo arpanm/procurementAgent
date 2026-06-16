@@ -172,6 +172,26 @@ export type FetchLike = (
 export type ProbeLike = (baseUrl: string) => Promise<boolean>;
 
 /**
+ * A non-OK HTTP response from the backend, carrying the numeric `status` so callers can distinguish a
+ * permanent client error (4xx — e.g. a 404 for a session the backend no longer has after a restart)
+ * from a transient one (5xx/network) and skip pointless retries.
+ */
+export class BackendHttpError extends Error {
+  constructor(
+    readonly path: string,
+    readonly status: number,
+  ) {
+    super(`Backend ${path} failed with status ${status}`);
+    this.name = "BackendHttpError";
+  }
+
+  /** A 4xx is permanent for an unchanged request — retrying it just spams the log. */
+  get isClientError(): boolean {
+    return this.status >= 400 && this.status < 500;
+  }
+}
+
+/**
  * Default reachability probe: a `no-cors` GET to `/actuator/health`. `no-cors` means we don't need CORS
  * headers on the health endpoint — the request resolves (opaque) when the host is reachable and rejects
  * when it isn't, which is exactly the signal we want. Aborts after a short timeout so a dead candidate
@@ -269,7 +289,7 @@ export class HttpBackendClient implements BackendClient {
     }
     if (!res.ok) {
       this.logFailStatus("POST", path, started, res.status);
-      throw new Error(`Backend ${path} failed with status ${res.status}`);
+      throw new BackendHttpError(path, res.status);
     }
     const result = (await res.json()) as T;
     this.logEnd("POST", path, started, res.status, summarizeResult(path, result));
@@ -292,7 +312,7 @@ export class HttpBackendClient implements BackendClient {
     }
     if (!res.ok) {
       this.logFailStatus("GET", path, started, res.status);
-      throw new Error(`Backend ${path} failed with status ${res.status}`);
+      throw new BackendHttpError(path, res.status);
     }
     const result = (await res.json()) as T;
     this.logEnd("GET", path, started, res.status, "");

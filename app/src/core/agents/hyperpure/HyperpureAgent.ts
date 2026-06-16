@@ -153,11 +153,12 @@ export class HyperpureAgent implements PlatformAgent {
       let obs = await this.openProductPage(line, detailUrl);
       let card = this.locateCard(obs, line);
 
-      // The detail URL is derived from a slug and can miss; recover via the search listing.
+      // The detail URL is derived from a slug and can miss (it 404s/redirects when the real product path
+      // differs); recover via the search listing, scrolling the virtualized grid until tiles/ADD render.
       if (!card && line.item) {
         traceAutomation("info", "product not on detail page → falling back to search listing", PLATFORM);
         await this.search(line.item);
-        obs = await this.session.observe();
+        obs = await this.settleListingForAdd(line);
         card = this.locateCard(obs, line);
       }
 
@@ -171,9 +172,12 @@ export class HyperpureAgent implements PlatformAgent {
         (card ? findAddButtonForCard(obs, card) : null) ??
         memoryButton ??
         (findHyperpureAddButtons(obs)[0] ?? null);
+      // Hand the user a link that actually resolves: the page we ended on if it's a real product page,
+      // else the (reliable) search-results URL — never a guessed slug that bounces to home/cart.
+      const handoffUrl = this.handoffUrlFor(line, obs, detailUrl);
       if (!addButton) {
         traceAutomation("warn", `no ADD button on ${obs.url}`, PLATFORM);
-        return this.fail(line, "no ADD button found on the product page", detailUrl);
+        return this.fail(line, "no ADD button found on the product page", handoffUrl);
       }
       if (memoryButton && memoryButton.idx === addButton.idx) {
         traceAutomation("info", `using learned ADD locator @${addButton.idx}`, PLATFORM);
@@ -187,22 +191,22 @@ export class HyperpureAgent implements PlatformAgent {
         return this.fail(
           line,
           "add-to-cart not confirmed (cart count unchanged and no quantity stepper appeared)",
-          detailUrl,
+          handoffUrl,
         );
       }
 
       traceAutomation("info", `✓ add confirmed; raising to qty ${line.qty}`, PLATFORM);
       await this.incrementTo(card ?? addButton, line.qty);
 
-      // Learn from this confirmed success: the working ADD/card signatures and the detail URL we used.
-      this.learnFromAdd(line, addButton, card, after, detailUrl);
+      // Learn from this confirmed success: the working ADD/card signatures and the URL we ended on.
+      this.learnFromAdd(line, addButton, card, after, handoffUrl);
 
       return {
         status: "added",
         skuId: line.skuId,
         qty: line.qty,
         cartUrl: this.cartUrl,
-        productUrl: detailUrl,
+        productUrl: handoffUrl,
       };
     } catch (err) {
       return this.fail(line, err instanceof Error ? err.message : String(err), detailUrl);
@@ -269,6 +273,37 @@ export class HyperpureAgent implements PlatformAgent {
   /** Match the product tile if we have the original item; on a single-product page the item context is enough. */
   private locateCard(obs: Observation, line: CartLineRequest): SerializedElement | null {
     return line.item ? findHyperpureProductCard(obs, line.item) : null;
+  }
+
+  /**
+   * Hyperpure's results grid is virtualized — tiles (and their inline ADD buttons) only mount as they
+   * scroll into view, so a single observe right after navigation sees just the page shell. Scroll a few
+   * steps, re-observing until the matching card OR any ADD control appears (bounded), then return the
+   * richest observation seen.
+   */
+  private async settleListingForAdd(line: CartLineRequest): Promise<Observation> {
+    let obs = await this.session.observe();
+    for (let i = 0; i < 8; i++) {
+      if (this.locateCard(obs, line) || findHyperpureAddButtons(obs).length > 0) return obs;
+      await this.session.act({ type: "scroll", dy: 600 });
+      obs = await this.session.observe();
+    }
+    return obs;
+  }
+
+  /**
+   * The link to hand back to the user (on success for "Review & checkout", on failure for a manual add):
+   * the page we actually ended on when it's a real product page, else the reliable search-results URL for
+   * the item, else the slug-derived detail URL as a last resort. Never returns a URL we know bounces away.
+   */
+  private handoffUrlFor(
+    line: CartLineRequest,
+    obs: Observation,
+    detailUrl: string | undefined,
+  ): string | undefined {
+    if (isHyperpureProductUrl(obs.url)) return obs.url;
+    if (line.item) return hyperpureSearchUrl(searchQueryFor(line.item) || line.item.name);
+    return detailUrl;
   }
 
   /**

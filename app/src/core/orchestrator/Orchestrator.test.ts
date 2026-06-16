@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { BackendHttpError } from "../backend/BackendClient";
 import type { BackendClient, OptimizeRequest } from "../backend/BackendClient";
 import type {
   Allocation,
@@ -188,6 +189,20 @@ describe("Orchestrator", () => {
 
     // First call rejected, retried, second resolved → exactly one event, two attempts.
     expect(appendEvent).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry the outbox on a permanent 4xx (e.g. session 404 after a backend restart)", async () => {
+    const appendEvent = vi
+      .fn()
+      .mockRejectedValue(new BackendHttpError("/sessions/s1/events", 404));
+    const { backend } = makeBackend({ appendEvent });
+    const orch = new Orchestrator(backend, { sessionId: "s1", retryDelayMs: 0 });
+
+    orch.recordQuote(quote());
+    await orch.flush();
+
+    // A 404 is permanent for an unchanged POST → dropped immediately, no retry storm.
+    expect(appendEvent).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to the request id and stays local-first when createSession fails", async () => {

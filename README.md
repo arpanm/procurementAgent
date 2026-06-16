@@ -105,7 +105,7 @@ never shipped to the app or logged). Defaults are in `backend/src/main/resources
 |---|---|---|
 | `ANTHROPIC_API_KEY` | _(empty)_ | Your Anthropic key. **Required for live reasoning.** Empty ⇒ stub mode. |
 | `ANTHROPIC_STUB_MODE` | `true` | `true` returns deterministic offline completions (no key, good for CI/local). Set `false` for live calls. |
-| `ANTHROPIC_MODEL` | `claude-opus-4-20250514` | Single strong model for all reasoning (no tiering in MVP). |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Single strong model for all reasoning (no tiering in MVP). |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Override for a proxy/gateway (e.g. your NAM gateway). |
 | `ANTHROPIC_VERSION` | `2023-06-01` | Anthropic API version header. |
 | `ANTHROPIC_MAX_TOKENS` | `2048` | Max output tokens per call. |
@@ -121,7 +121,7 @@ never shipped to the app or logged). Defaults are in `backend/src/main/resources
 cd backend
 export ANTHROPIC_API_KEY=sk-ant-...      # your real key
 export ANTHROPIC_STUB_MODE=false         # turn on live reasoning
-export ANTHROPIC_MODEL=claude-opus-4-20250514
+export ANTHROPIC_MODEL=claude-sonnet-4-6
 mvn spring-boot:run                      # http://localhost:8080  (health: /actuator/health)
 ```
 
@@ -131,7 +131,7 @@ A convenient `.env` file (loaded by Docker Compose, see below) — never commit 
 # .env  (repo root)
 ANTHROPIC_API_KEY=sk-ant-...
 ANTHROPIC_STUB_MODE=false
-ANTHROPIC_MODEL=claude-opus-4-20250514
+ANTHROPIC_MODEL=claude-sonnet-4-6
 ```
 
 ## Deploying the backend with Docker
@@ -155,7 +155,7 @@ docker build -t procure-copilot-backend:latest .
 docker run --rm -p 8080:8080 \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e ANTHROPIC_STUB_MODE=false \
-  -e ANTHROPIC_MODEL=claude-opus-4-20250514 \
+  -e ANTHROPIC_MODEL=claude-sonnet-4-6 \
   procure-copilot-backend:latest
 ```
 

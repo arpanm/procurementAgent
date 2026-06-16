@@ -194,8 +194,11 @@ describe("HyperpureAgent.addToCart (confirmed)", () => {
     expect(result.reason).toMatch(/not confirmed/i);
   });
 
-  it("returns 'failed' (no ADD button) when the page has no add control", async () => {
-    const page = obs([el({ idx: 1, tag: "div", name: "Something unrelated" })], productUrl);
+  it("returns 'failed' (no ADD button) and hands back the reliable search URL, not a dead slug", async () => {
+    // The slug-derived detail page doesn't hold the product (no add control) and we land on a non-product
+    // page; the agent recovers via search and hands back the search-results URL — never a guessed slug
+    // that bounces to home/cart (the "onion link showed the cart page" bug).
+    const page = obs([el({ idx: 1, tag: "div", name: "Something unrelated" })], "https://www.hyperpure.com");
     const observe = vi.fn().mockResolvedValue(page);
     const session = fakeSession({ observe });
 
@@ -207,8 +210,47 @@ describe("HyperpureAgent.addToCart (confirmed)", () => {
 
     expect(result.status).toBe("failed");
     expect(result.reason).toMatch(/no ADD button/i);
-    // The detail URL is derived from the SKU slug and still handed back for the manual fallback.
-    expect(result.productUrl).toBe("https://www.hyperpure.com/in/hp-paneer-1kg");
+    expect(session.search).not.toHaveBeenCalled(); // direct search-URL open, not engine self-heal
+    expect(result.productUrl).toContain("/in/search/milky-mist-paneer-1-kg");
+  });
+
+  it("recovers via the search listing when the slug detail page misses, then adds", async () => {
+    // onion-style: the guessed detail slug doesn't hold the product, so we re-search and add from the
+    // (settled) listing tile. The grid is virtualized, so the card only appears after a scroll.
+    const onion: RequestedItem = { raw: "10kg onion", name: "onion", qty: 10, unit: "kg" };
+    const onionCard = el({ idx: 12, tag: "h3", name: "Onion (Big), 10 kg ₹364", bbox: [40, 800, 200, 60] });
+    const onionAdd = el({ idx: 13, tag: "button", name: "ADD +", bbox: [60, 850, 90, 40] });
+    const detailShell = obs([el({ idx: 1, tag: "div", name: "Home" })], "https://www.hyperpure.com");
+    const listingShell = obs([el({ idx: 1, tag: "div", name: "loading" })], "https://www.hyperpure.com/in/search/onion");
+    const listingReady = obs(
+      [onionCard, onionAdd],
+      "https://www.hyperpure.com/in/search/onion",
+    );
+    const afterAdd = obs(
+      [
+        onionCard,
+        el({ idx: 50, tag: "button", name: "−", bbox: [50, 850, 30, 30] }),
+        el({ idx: 51, tag: "button", name: "+", bbox: [140, 850, 30, 30] }),
+      ],
+      "https://www.hyperpure.com/in/search/onion",
+    );
+    const observe = vi
+      .fn()
+      .mockResolvedValueOnce(detailShell) // open(detail slug) → not the product
+      .mockResolvedValueOnce(listingShell) // first listing observe → grid not mounted yet
+      .mockResolvedValueOnce(listingReady) // after a scroll → tile + ADD appear
+      .mockResolvedValue(afterAdd); // after the ADD click → stepper
+    const session = fakeSession({ observe });
+
+    const result = await new HyperpureAgent({ session, cartUrl: "https://cart" }).addToCart({
+      skuId: "onion-big-10-kg",
+      qty: 1,
+      item: onion,
+    });
+
+    expect(result.status).toBe("added");
+    expect(session.act).toHaveBeenCalledWith({ type: "click", idx: 13 });
+    expect(result.productUrl).toContain("/in/search/onion");
   });
 });
 

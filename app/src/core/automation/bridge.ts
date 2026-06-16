@@ -398,24 +398,24 @@ export class CapgoBridge extends AbstractBridge {
   }
 
   async open(id: string, url: string, hidden: boolean): Promise<void> {
-    // Reuse the live native webview for this logical id by navigating it (setUrl) instead of opening a
-    // brand-new window on every search / Claude `navigate`. Opening repeatedly stacks orphaned webviews
-    // that are never closed — the "multiple Hyperpure screens, none closing" bug. Fall back to a fresh
-    // openWebView if the existing one is gone (e.g. user closed it) so the flow still recovers.
+    // Always open a FRESH native webview so the page fires `browserPageLoaded` → our `reinjectPending`
+    // safety net runs. A `setUrl` navigation on a reused webview does NOT reliably emit that event, so a
+    // settle/perceive call whose script context the navigation wiped never gets re-injected and strands
+    // at the 15s timeout — the "open/login failed: Bridge call timed out" regression. To still avoid the
+    // "multiple Hyperpure screens, none closing" stacking bug, close any existing webview for this
+    // logical id first (cookies/session live in the shared WebView store, so auth survives the reopen).
     const existing = this.idMap.get(id);
     if (existing) {
       try {
-        await this.plugin.setUrl({ id: existing, url });
-        if (isAutomationDebug()) await this.injectProbe(id);
-        return;
+        await this.plugin.close({ id: existing });
       } catch (err) {
         traceAutomation(
           "warn",
-          `reuse via setUrl failed (${err instanceof Error ? err.message : String(err)}); opening a fresh webview`,
+          `close-before-reopen failed (${err instanceof Error ? err.message : String(err)}); the old webview may already be gone`,
           this.logicalIdFor(existing),
         );
-        this.idMap.delete(id);
       }
+      this.idMap.delete(id);
     }
     const res = await this.plugin.openWebView({ url, hidden, ...this.openOptions() });
     if (res && typeof res.id === "string") this.idMap.set(id, res.id);
