@@ -5,6 +5,7 @@
 **Target user:** Indian retailers & restaurant owners (kirana, HoReCa) who already buy on B2B platforms
 **Doc owner:** Arpan • **Status:** v0.3 engineering plan for quick MVP
 **Scope (this plan):** **Amazon.in + Hyperpure only.** Everything else is designed-for but not built.
+**See also:** [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — how the system works today (diagrams, flowcharts, code links) • [`README.md`](./README.md) — build/run.
 
 **Resolved decisions (MVP):**
 - **App shell:** **Capacitor (Ionic) + Capgo `@capgo/capacitor-inappbrowser`** for the automation engine; automation kept behind a clean interface so a native Android plugin can replace it later if a site forces it.
@@ -34,13 +35,27 @@
 - **True prices + quantity reconciliation.** Amazon reads the detail-page buybox price (not the noisy
   listing); per-line quantities are reconciled to each platform's sold pack size (`ceil(total / packSize)`);
   the default per-item pick is the lowest ₹ per kg/L/piece.
-- **Guided-RAG knowledge: partial.** A curated per-platform policies/hints layer (`knowledge/` +
-  backend `/knowledge`) is implemented and consumed by agents. Continuous on-device learning from
-  screenshots/DOM is **pending** (`recordObservation` exists; the persistent learning pipeline is not wired).
+- **Guided-RAG knowledge + durable site memory (two layers).** (1) A curated per-platform policies/hints
+  layer (`knowledge/` + backend `/knowledge`) consumed by agents. (2) An on-device **`SiteMemory`**
+  (`knowledge/siteMemory.ts` + `signature.ts`, localStorage) that learns durable product URLs and element
+  signatures (search box, product card, ADD button — tag/role/name/attrs/bbox) from successful runs and
+  tries them before vision/Claude. Wired into `HyperpureAgent` (`learnFromAdd`/`recallProductUrl`/
+  `matchSignature`). The *continuous* learning pipeline that folds observations back into extraction
+  automatically is still **pending** (notes are advisory today).
+- **Candidate / nearby-SKU picker (new).** The vision read returns a **ranked top-N** of candidates per
+  platform (`/vision/extract` → `candidates[]`); the device classifies each as `exact`/`nearby`
+  (`pricing/matchKind.ts`) and auto-picks the cheapest exact ₹/unit. When the default pick is only a
+  `nearby` match, `ComparisonPage` shows an inline "choose a nearby SKU" picker (`select-sku` modify →
+  re-optimize) so the user picks without leaving the app.
 - **First-run login gate + opt-in debug tracing** are implemented (see Epics 0/6 and §3.5).
+- **Reliability guardrails (new).** Self-explanatory Claude HTTP errors + a boot-time
+  `AnthropicStartupProbe` (catches a retired model id loudly); webview `open()` close-then-reopen (fixes
+  stacked webviews + the stranded-settle timeout); outbox drops permanent `4xx` (`BackendHttpError`) instead
+  of retry storms; failed adds hand back an honest search URL.
 
-**Pending / not yet built:** candidate/nearby-product selection UI, continuous RAG learning,
-CP-SAT optimizer (greedy ships), and re-enabling Amazon once the WAF challenge is solved.
+**Pending / not yet built:** continuous RAG learning loop, CP-SAT optimizer (greedy ships), the replayable
+golden-path eval harness / playbook shadow-mode promotion, and re-enabling Amazon once the WAF challenge is
+solved. (The candidate/nearby-product picker, previously pending, is now implemented.)
 
 ---
 
@@ -519,7 +534,7 @@ SKU normalization (mapping "Aashirvaad Atta 10kg" across Amazon and Hyperpure to
 - **Tech:** SKU normalizer (embedding + fuzzy + confirmed cache), `optimize()` greedy, per-order P&L generator, then CP-SAT behind same interface.
 - **Feature:** comparison card in rupees with per-item reason and total saving vs single-platform baseline.
 - **Acceptance:** optimizer never proposes an out-of-stock item; greedy within 5% of MILP optimum on a 50-case benchmark.
-- **Implemented:** greedy `optimize()` on the backend (`POST /optimize`) + the rupee comparison card. Three pricing refinements landed on the device: **pack-price normalisation** (`pricing/packPricing.ts`, ₹/kg·L·piece), **best-value default pins** (`optimizer/defaultSelection.ts`, lowest per-unit price so a 1 kg pack isn't beaten by a cheaper-looking 500 g pack), and **quantity reconciliation** (`pricing/quantityReconcile.ts`, `ceil(totalRequested / soldPackSize)`), all wired through `Orchestrator.optimize` so the comparison UI and staged cart use the correct counts. **Pending:** the embedding/fuzzy SKU normalizer, a candidate/nearby-product selection UI, and the CP-SAT optimizer (greedy ships).
+- **Implemented:** greedy `optimize()` on the backend (`POST /optimize`) + the rupee comparison card. Three pricing refinements landed on the device: **pack-price normalisation** (`pricing/packPricing.ts`, ₹/kg·L·piece), **best-value default pins** (`optimizer/defaultSelection.ts`, lowest per-unit price so a 1 kg pack isn't beaten by a cheaper-looking 500 g pack), and **quantity reconciliation** (`pricing/quantityReconcile.ts`, `ceil(totalRequested / soldPackSize)`), all wired through `Orchestrator.optimize` so the comparison UI and staged cart use the correct counts. A **candidate / nearby-SKU picker** also landed: `/vision/extract` returns a ranked top-N, the device classifies each match as `exact`/`nearby` (`pricing/matchKind.ts` `chooseQuote`) and auto-picks the cheapest exact ₹/unit, and `ComparisonPage` surfaces an inline picker (`select-sku` → re-optimize) only when the default is a `nearby` match. **Pending:** the embedding/fuzzy SKU normalizer and the CP-SAT optimizer (greedy ships).
 
 ### Epic 5 — HITL confirmation UX
 - **Tech:** approval state machine; modify flow (swap platform / qty / drop item → re-optimize); idempotent resumable session.
@@ -535,7 +550,7 @@ SKU normalization (mapping "Aashirvaad Atta 10kg" across Amazon and Hyperpure to
 
 ### Epic 7 — Observability, eval & self-healing (continuous)
 - **Tech:** golden-path eval harness (replayable site fixtures), step-level traces, playbook drift detection, shadow-mode for new playbooks, grounder confidence calibration, counterfactual logging. (Mirrors the QA framework already designed for the shopping agent.)
-- **Implemented (partial):** opt-in step-level tracing on-device (`debug/automationDebug.ts` overlay + `adb logcat`, including every backend/LLM call), backend telemetry step traces, recorded site fixtures, and a guided-knowledge layer that can `recordObservation` against a per-platform corpus. **Pending:** the replayable golden-path eval harness, playbook drift detection / shadow-mode promotion, grounder confidence calibration, and the continuous RAG learning loop (observations are curated/advisory today, not yet folded back into extraction automatically).
+- **Implemented (partial):** opt-in step-level tracing on-device (`debug/automationDebug.ts` overlay + `adb logcat`, including every backend/LLM call), backend telemetry step traces, recorded site fixtures, a guided-knowledge layer that can `recordObservation` against a per-platform corpus, and a durable on-device `SiteMemory` that learns product URLs + element signatures from successful runs. **Reliability guardrails** also shipped here: self-explanatory Claude HTTP-error messages + a boot `AnthropicStartupProbe` (loudly flags a retired/unreachable model id so it surfaces as config, not as in-app "nothing found"); the outbox drops permanent `4xx` (`BackendHttpError.isClientError`) instead of retry storms; and the `bridge.open()` close-then-reopen fix for the webview lifecycle. **Pending:** the replayable golden-path eval harness, playbook drift detection / shadow-mode promotion, grounder confidence calibration, and the continuous RAG learning loop (observations are advisory today, not yet folded back into extraction automatically).
 
 ---
 
@@ -623,7 +638,9 @@ Build the interface and the optimizer/HITL/audit layers to be platform-count-agn
 5. **App shell** — Capacitor + Capgo InAppBrowser, automation behind a swappable interface.
 
 **Still to decide:**
-- Which **Claude model** specifically (latest Opus vs Sonnet) given the cost/latency-per-order budget you want to hold.
+- ~~Which **Claude model** specifically~~ — **resolved:** `ANTHROPIC_MODEL=claude-sonnet-4-6` (the prior
+  `claude-opus-4-20250514` was retired by Anthropic; the startup probe now guards against this class of
+  failure). Revisit per cost/latency-per-order budget.
 - **STT provider** for reliable Hindi/Bengali field audio (Android `SpeechRecognizer` vs Bhashini vs cloud).
 - Whether to stand up the **remote-config playbook endpoint** day one (recommended) or bundle-only until first selector breakage.
 - Pilot cohort: how many retailers, which city, and whose Amazon/Hyperpure accounts (consent + ToS posture).

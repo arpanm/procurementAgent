@@ -12,8 +12,13 @@ user to review and check out (OTP/payment is **always** the human — no code pa
 > `app/src/core/config.ts` (override with `VITE_ACTIVE_PLATFORMS`).
 
 This repo implements **Epics 0–6** of [`PROCURE_COPILOT_PLAN.md`](./PROCURE_COPILOT_PLAN.md) (the MVP),
-plus a per-platform agent split, true-price reads, quantity reconciliation, a guided-knowledge layer, a
-first-run login gate, and a cart hand-off — see the architecture notes below.
+plus a per-platform agent split, true-price reads, quantity reconciliation, a guided-knowledge layer +
+durable on-device site memory, a candidate / nearby-SKU picker, a first-run login gate, and a cart hand-off.
+
+> 📐 **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** is the detailed architecture reference — diagrams,
+> flowcharts and code links for the UI/WebView layer, per-platform login, intent classification, the RAG /
+> site-memory pipeline, agent execution, comparison, add-to-cart, the cart hand-off, and
+> deployment/observability/eval. Start there for "how does X work?".
 
 ## Layout
 
@@ -35,9 +40,11 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   detail-page add with add/confirm), or the behavior-neutral `LegacyAgent` (used by the demo mock).
 - `adapters/` — **Epic 3** shared playbooks, selectors, recorded fixtures, engine factory + health/self-heal
   (the per-platform agents in `agents/` now own the divergent Amazon/Hyperpure strategy).
-- `knowledge/` — **guided-RAG knowledge layer**: `PlatformKnowledge` model, `DefaultKnowledgeStore`
-  (`getKnowledge`/`recordObservation`, backend transport + built-in `defaults`). Feeds agents per-platform
-  policies/hints (e.g. `policies.priceFromDetailPage`, `hints.atcTokens`).
+- `knowledge/` — **guided-RAG knowledge layer + durable site memory**: `PlatformKnowledgeStore`
+  (`getKnowledge`/`recordObservation`, backend transport + built-in `defaults`) feeds agents per-platform
+  policies/hints (e.g. `policies.priceFromDetailPage`, `hints.atcTokens`); `siteMemory.ts` + `signature.ts`
+  learn durable product URLs + element signatures (search box / product card / ADD button) from successful
+  runs (localStorage) and are tried before vision/Claude.
 - `intent/` — **Epic 1** device-side scrubber, intent client, editable item-list model, i18n (en/hi/bn).
 - `optimizer/` + `pricing/` + `orchestrator/` — **Epics 4/5** event-sourced `ProcurementSession`,
   single-writer `Orchestrator` with a durable outbox, optimizer client + rupee explanation;
@@ -53,7 +60,8 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   the cart hand-off behind the orchestrator.
 
 ### Backend (`backend/src/main/java/ai/procurecopilot/backend`)
-- `llm/` — **Epic 0** `ClaudeService` (single entry point; stub mode for offline/CI), `SecretScrubber`.
+- `llm/` — **Epic 0** `ClaudeService` (single entry point; stub mode for offline/CI; granular HTTP-error
+  hints), `SecretScrubber`, `AnthropicStartupProbe` (boot-time model reachability check).
 - `optimizer/` — **Epic 4** greedy cart-split optimizer (`POST /optimize`).
 - `agent/` — **Epic 1/2/6** `/intent`, `/plan`, `/next-action` (grounding), `/verify` (cart-vs-plan
   Verifier), `/vision/extract` (screenshot price read).
@@ -81,10 +89,16 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   `Orchestrator.optimize` so the comparison UI and staged cart use the right counts.
 - **Best-value defaults** (`optimizer/defaultSelection.ts`): each item is pre-pinned to the lowest
   **₹ per kg/L/piece** (`pricing/packPricing.ts`) so a 1 kg pack isn't beaten by a cheaper-*looking* 500 g pack.
-- **Guided-knowledge layer** (`knowledge/`): curated per-platform policies/hints steer the agents (e.g.
-  Amazon `priceFromDetailPage`, add-to-cart token hints), served by the backend with built-in offline
-  defaults. This is a **guided hints layer**; continuous on-device learning from screenshots/DOM is
-  **planned/partial** (`recordObservation` exists; the persistent learning pipeline is not yet wired).
+- **Candidate / nearby-SKU picker** (`pricing/matchKind.ts` + `ui/pages/ComparisonPage.tsx`): the vision read
+  returns a **ranked top-N** (`/vision/extract` → `candidates[]`); each is classified `exact`/`nearby` and the
+  cheapest exact ₹/unit is auto-picked. When the default pick is only a `nearby` match, the comparison page
+  shows an inline "choose a nearby SKU" picker (`select-sku` → re-optimize) so you pick without leaving the app.
+- **Guided-knowledge layer + site memory** (`knowledge/`): curated per-platform policies/hints steer the
+  agents (e.g. Amazon `priceFromDetailPage`, add-to-cart token hints), served by the backend with built-in
+  offline defaults. A durable on-device **`SiteMemory`** also learns product URLs + element signatures from
+  successful runs and tries them before vision/Claude (`HyperpureAgent.learnFromAdd`/`recallProductUrl`).
+  Continuous on-device learning that folds observations back into extraction automatically is **planned/partial**
+  (`recordObservation` exists; the persistent learning loop is not yet wired).
 - **First-run login gate** (`auth/loginStore.ts` + `ui/pages/LoginGate.tsx`): the user manually signs in to
   each active platform's WebView (OTP + delivery location) once; only a per-platform boolean is persisted —
   never credentials/OTPs. The chat is gated until every `ACTIVE_PLATFORMS` entry is confirmed (demo mode skips it).
@@ -95,6 +109,12 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   on-screen overlay + `adb logcat` stream every step, **every backend call including the Claude/vision LLM
   calls** (`backend` channel, with timing + a compact request/response summary), WebView actions, and the
   injected `[hpinj]` settle/emit diagnostics; benign console noise is filtered.
+- **Reliability guardrails.** `ClaudeService` returns self-explanatory HTTP errors (404 → "model not found;
+  update `ANTHROPIC_MODEL`", 401/403 → key, 429 → quota) and an `AnthropicStartupProbe` loudly flags a
+  retired/unreachable model at boot, so a model deprecation surfaces as config — not as in-app "nothing
+  found". The orchestrator outbox drops permanent `4xx` (`BackendHttpError`) instead of retry storms, the
+  WebView `open()` closes-then-reopens (no stacked webviews / stranded settle), and a failed add hands back an
+  honest search URL.
 
 ## Configuration (backend env vars)
 
@@ -345,12 +365,16 @@ its old config/parser until restarted).
 ## Tests
 
 ```bash
-cd backend && mvn test            # 91 tests — JUnit 5 + MockMvc + SSE integration
-cd app && npm test                # 329 tests — Vitest + jsdom + Testing Library
+cd backend && mvn test            # 93 tests — JUnit 5 + MockMvc + SSE integration
+cd app && npm test                # 360 tests — Vitest + jsdom + Testing Library
 cd app && npm run typecheck && npm run build
 cd app && npm run test:e2e        # 10 Playwright web e2e specs (dev server + stub backend)
 cd app && npm run test:e2e:android  # Appium + WebdriverIO (UiAutomator2) on-device journeys
 ```
+
+> **Note:** run the backend tests with stub mode (`ANTHROPIC_STUB_MODE=true` / no key), otherwise
+> `BackendEndpointsWebTest.nextActionEndpointReturnsOneAction` can fail — with a live key the `/next-action`
+> grounding call hits the real model and returns a `click` instead of the stub's deterministic `type`.
 
 The Android E2E suite (`app/e2e-android/`) and the demo APK (`npm run android:demo:build`, which builds
 with `VITE_DEMO=1` + the `MockAutomationEngine`) let you exercise the full journey on an emulator without
