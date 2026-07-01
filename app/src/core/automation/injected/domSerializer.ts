@@ -42,6 +42,12 @@ const INTERACTIVE_ROLES = new Set([
 // token budget much (most elements are far shorter than the cap).
 const MAX_NAME_LEN = 200;
 
+// Hyperpure renders its price footer (e.g. "₹389", "₹38.9/kg") in plain non-interactive nodes that
+// the interactivity gate drops, so DOM price extraction saw priced=0 and fell back to stub data. We
+// additionally serialize the *smallest* element carrying a rupee price (a child with no priced
+// descendant) so the price reaches the Observation without flooding it with parent containers.
+const PRICE_LEAF_RE = /(?:₹|rs\.?|inr)\s*[\d,]/i;
+
 export interface SerializeOptions {
   /** Cap the number of serialized elements to keep the token budget bounded (§3.5.4). */
   readonly maxElements?: number;
@@ -63,7 +69,8 @@ export function serializeDom(
       const shadow = (el as HTMLElement).shadowRoot;
       if (shadow) walk(shadow);
       if (out.length >= maxElements) return;
-      if (!isInteractive(el, win) || !isVisible(el, win)) continue;
+      if (!isInteractive(el, win) && !isPriceLeaf(el)) continue;
+      if (!isVisible(el, win)) continue;
       el.setAttribute("data-pc-idx", String(idx));
       out.push(serializeElement(el, idx));
       idx++;
@@ -128,6 +135,19 @@ function isInteractive(el: Element, win: Window): boolean {
   if (typeof tabIndex === "number" && tabIndex >= 0) return true;
   if (win.getComputedStyle(el).cursor === "pointer") return true;
   return false;
+}
+
+function isPriceLeaf(el: Element): boolean {
+  const he = el as HTMLElement;
+  const text = (typeof he.innerText === "string" ? he.innerText : he.textContent) || "";
+  if (!PRICE_LEAF_RE.test(text)) return false;
+  const kids = el.querySelectorAll("*");
+  for (let i = 0; i < kids.length; i++) {
+    const kt =
+      (kids[i] as HTMLElement).innerText || kids[i].textContent || "";
+    if (PRICE_LEAF_RE.test(kt)) return false;
+  }
+  return true;
 }
 
 function isVisible(el: Element, win: Window): boolean {
@@ -278,8 +298,19 @@ export function buildSerializerScript(requestId: string): string {
   var TAGS = ${interactiveTags};
   var ROLES = ${interactiveRoles};
   var MAX = ${MAX_NAME_LEN};
+  var PRICE = ${PRICE_LEAF_RE.toString()};
   var out = [];
   var idx = 0;
+  function priceLeaf(el) {
+    var t = (typeof el.innerText === 'string' ? el.innerText : el.textContent) || '';
+    if (!PRICE.test(t)) return false;
+    var kids = el.querySelectorAll('*');
+    for (var k = 0; k < kids.length; k++) {
+      var kt = kids[k].innerText || kids[k].textContent || '';
+      if (PRICE.test(kt)) return false;
+    }
+    return true;
+  }
   function visible(el) {
     var node = el;
     while (node) {
@@ -312,7 +343,8 @@ export function buildSerializerScript(requestId: string): string {
     for (var i = 0; i < all.length; i++) {
       var el = all[i];
       if (el.shadowRoot) walk(el.shadowRoot);
-      if (!interactive(el) || !visible(el)) continue;
+      if (!interactive(el) && !priceLeaf(el)) continue;
+      if (!visible(el)) continue;
       el.setAttribute('data-pc-idx', idx);
       var r = el.getBoundingClientRect();
       var tag = el.tagName;

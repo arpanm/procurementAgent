@@ -19,7 +19,7 @@ export function executeAction(doc: Document, action: EngineAction): ActionResult
       if (!el) return { ok: false, reason: "stale-handle" };
       scrollIntoView(el);
       if (action.type === "click") {
-        resolveClickTarget(el).click();
+        tapElement(resolveClickTarget(el));
         return { ok: true };
       }
       if (action.type === "type") {
@@ -51,6 +51,31 @@ export function executeAction(doc: Document, action: EngineAction): ActionResult
 }
 
 /**
+ * The element a real finger actually lands on: the DEEPEST node at the tap point. Dispatching there
+ * (instead of on the resolved `<button>`) is what makes handlers bound to an INNER child fire —
+ * Hyperpure binds ADD's `onClick` to a `<span>` INSIDE the `<button>`, and React's delegated events
+ * only fire that handler when the event target is the span or a descendant. A click dispatched on the
+ * ancestor button bubbles UP and never passes through the child span (the "ADD clicked, cart unchanged,
+ * DOM byte-identical" bug). Prefer `elementFromPoint` (real layout); fall back to the deepest first-child
+ * leaf for jsdom/zero-layout, which still bubbles up through any inner handler.
+ */
+function deepestClickTarget(el: HTMLElement): Element {
+  const doc = el.ownerDocument;
+  try {
+    const r = el.getBoundingClientRect?.();
+    if (r && (r.width || r.height) && typeof doc?.elementFromPoint === "function") {
+      const hit = doc.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      if (hit && el.contains(hit)) return hit;
+    }
+  } catch {
+    /* getBoundingClientRect / elementFromPoint unavailable — fall through to the leaf walk */
+  }
+  let node: Element = el;
+  while (node.firstElementChild) node = node.firstElementChild;
+  return node;
+}
+
+/**
  * The click handler is usually on the real `<button>`/`<a>`, but the serializer often hands us the
  * surrounding tile/label element — clicking that fires nothing. Resolve to the nearest interactive node
  * (self → interactive descendant → interactive ancestor) so the click lands on the actual control.
@@ -74,6 +99,42 @@ function resolveClickTarget(el: Element): HTMLElement {
     p = p.parentElement;
   }
   return el as HTMLElement;
+}
+
+/**
+ * Tap an element the way a finger does on a touch device: a touchstart→touchend sequence in addition to
+ * the native click. Hyperpure's mobile SPA binds its ADD-to-cart handler to touch (tap) events, so a bare
+ * `.click()` was a silent no-op (the "ADD clicked, cart unchanged, DOM byte-identical" bug). Kept in sync
+ * with the live `buildActionScript` robustClick so the tested pure path and the on-device path behave the
+ * same. Touch event constructors are best-effort (jsdom lacks `Touch`/`TouchEvent`) — they degrade to a
+ * generic bubbling Event so a handler bound to `touchstart`/`touchend` still fires.
+ */
+function tapElement(el: HTMLElement): void {
+  // Dispatch on the innermost node at the tap point, not the resolved button: a handler bound to an
+  // inner child (Hyperpure's ADD onClick lives on a <span> inside the <button>) only fires when the
+  // event bubbles UP through it, which requires the event target to be that child or a descendant.
+  const target = deepestClickTarget(el);
+  const win = el.ownerDocument?.defaultView ?? (typeof window !== "undefined" ? window : null);
+  for (const type of ["touchstart", "touchend"]) {
+    try {
+      const TouchEventCtor = (win as unknown as { TouchEvent?: typeof TouchEvent })?.TouchEvent;
+      const ev = TouchEventCtor
+        ? new TouchEventCtor(type, { bubbles: true, cancelable: true })
+        : new Event(type, { bubbles: true, cancelable: true });
+      target.dispatchEvent(ev);
+    } catch {
+      try {
+        target.dispatchEvent(new Event(type, { bubbles: true, cancelable: true }));
+      } catch {
+        /* environment without Event — nothing more to do */
+      }
+    }
+  }
+  try {
+    (target as HTMLElement).click?.();
+  } catch {
+    /* click unavailable — the touch sequence above is the fallback */
+  }
 }
 
 function scrollIntoView(el: Element): void {
@@ -184,25 +245,68 @@ export function buildActionScript(requestId: string, action: EngineAction): stri
     }
     return n;
   }
+  // The DEEPEST node at the tap point — what a real finger hits. Hyperpure binds ADD's onClick to a
+  // <span> INSIDE the <button>; React's delegated events only fire that handler when the target is the
+  // span or a descendant, so a gesture dispatched on the ancestor button bubbles up and never triggers
+  // it (the "ADD clicked, cart unchanged, DOM byte-identical" no-op). elementFromPoint gives the inner
+  // span; the leaf-walk is the fallback when layout is unavailable.
+  function deepestAt(t) {
+    try {
+      var r = t.getBoundingClientRect && t.getBoundingClientRect();
+      if (r && (r.width || r.height) && document.elementFromPoint) {
+        var hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        if (hit && t.contains(hit)) return hit;
+      }
+    } catch (eD) {}
+    var n = t;
+    while (n.firstElementChild) n = n.firstElementChild;
+    return n;
+  }
   function robustClick(node) {
     var t = resolveTarget(node);
     try { if (t.scrollIntoView) t.scrollIntoView({ block: 'center' }); } catch (e0) {}
-    var r = (t.getBoundingClientRect && t.getBoundingClientRect()) || { left: 0, top: 0, width: 0, height: 0 };
+    var target = deepestAt(t);
+    var r = (target.getBoundingClientRect && target.getBoundingClientRect()) || { left: 0, top: 0, width: 0, height: 0 };
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     var base = { bubbles: true, cancelable: true, composed: true, view: window,
-      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0 };
+      clientX: cx, clientY: cy, button: 0 };
     try { if (t.focus) t.focus(); } catch (e1) {}
-    // Fire a full pointer+mouse gesture so handlers bound to pointerdown/mousedown also react, THEN a single
-    // native click (one click only — never both a synthetic 'click' event and .click(), to avoid double-add).
-    var gesture = [['pointerover', 1], ['pointerenter', 1], ['pointerdown', 1], ['mousedown', 0], ['pointerup', 1], ['mouseup', 0]];
-    gesture.forEach(function (g) {
+    // Hyperpure is a TOUCH-optimized mobile SPA: its ADD handler is bound to touch (tap) events, so a
+    // pointer+mouse+click gesture alone was a silent no-op (the "ADD clicked, cart unchanged, DOM byte
+    // identical" bug). Fire a real touch tap (touchstart→touchend) in addition to pointer/mouse/click so
+    // whichever event family the handler listens on reacts.
+    function fireTouch(type) {
       try {
-        var isPtr = g[1] === 1;
-        var Ctor = isPtr && window.PointerEvent ? PointerEvent : MouseEvent;
-        var opts = isPtr ? Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, base) : base;
-        t.dispatchEvent(new Ctor(g[0], opts));
-      } catch (e2) {}
-    });
-    try { if (typeof t.click === 'function') t.click(); else t.dispatchEvent(new MouseEvent('click', base)); } catch (e3) {}
+        var touch = (typeof Touch === 'function')
+          ? new Touch({ identifier: 1, target: target, clientX: cx, clientY: cy, pageX: cx, pageY: cy, radiusX: 2, radiusY: 2, force: 1 })
+          : null;
+        var list = touch ? [touch] : [];
+        var te = new TouchEvent(type, { bubbles: true, cancelable: true, composed: true, view: window,
+          touches: type === 'touchend' ? [] : list,
+          targetTouches: type === 'touchend' ? [] : list,
+          changedTouches: list });
+        target.dispatchEvent(te);
+        return true;
+      } catch (eT) { return false; }
+    }
+    // Full tap order on touch devices: pointerdown → touchstart → touchend → pointerup → mousedown → mouseup → click.
+    var gesture = [['pointerover', 1], ['pointerenter', 1], ['pointerdown', 1]];
+    var tail = [['pointerup', 1], ['mousedown', 0], ['mouseup', 0]];
+    function fire(list) {
+      list.forEach(function (g) {
+        try {
+          var isPtr = g[1] === 1;
+          var Ctor = isPtr && window.PointerEvent ? PointerEvent : MouseEvent;
+          var opts = isPtr ? Object.assign({ pointerId: 1, pointerType: 'touch', isPrimary: true }, base) : base;
+          target.dispatchEvent(new Ctor(g[0], opts));
+        } catch (e2) {}
+      });
+    }
+    fire(gesture);
+    fireTouch('touchstart');
+    fireTouch('touchend');
+    fire(tail);
+    try { if (typeof target.click === 'function') target.click(); else target.dispatchEvent(new MouseEvent('click', base)); } catch (e3) {}
   }
   try {
     if (a.type === 'click' || a.type === 'type' || a.type === 'select') {

@@ -26,6 +26,7 @@ import type {
 } from "../PlatformAgent";
 import { parsePackSize } from "../../pricing/packPricing";
 import type { KnowledgeDoc } from "../../knowledge/PlatformKnowledge";
+import { buildTokenMatcher } from "../../knowledge/tokenMatcher";
 import {
   amazonProductUrl,
   asinFromUrl,
@@ -234,18 +235,6 @@ function findAddToCartButton(obs: Observation, atc: RegExp): SerializedElement |
 /** True when the page shows a post-add confirmation (item is really in the cart). */
 function addConfirmed(obs: Observation, added: RegExp): boolean {
   return obs.elements.some((el) => added.test(elementText(el)));
-}
-
-/**
- * Combine a base regex with any extra knowledge hint tokens into one case-insensitive matcher. Tokens are
- * escaped and OR'd onto the base pattern, so curated/learned phrasings extend (never replace) the built-in
- * matcher. Returns the base regex unchanged when there are no usable tokens.
- */
-function buildTokenMatcher(base: RegExp, tokens: readonly string[] | undefined): RegExp {
-  const clean = (tokens ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
-  if (clean.length === 0) return base;
-  const escaped = clean.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return new RegExp(`${base.source}|${escaped.join("|")}`, "i");
 }
 
 /** Stable SKU id from a title when no ASIN is available. */

@@ -594,6 +594,52 @@ describe("CheckoutDriver — stageCart with a per-platform agent", () => {
     expect(trail.find((e) => e.action === "cart:add")).toBeTruthy();
     expect(trail.find((e) => e.action === "cart:add-failed")).toBeTruthy();
   });
+
+  it("ships a guided-RAG failure report (only) for the line that failed to stage", async () => {
+    const fake = makeFakeEngine({});
+    // Engine exposes observe + screenshot so the report carries a DOM digest + image.
+    (fake.engine as unknown as { observe: () => Promise<unknown> }).observe = vi
+      .fn()
+      .mockResolvedValue({ url: "https://www.hyperpure.com/p/paneer", title: "", scroll: { y: 0, h: 0, vh: 0 }, elements: [] });
+    (fake.engine as unknown as { captureScreenshot: () => Promise<string> }).captureScreenshot = vi
+      .fn()
+      .mockResolvedValue("BASE64PNG");
+    const audit = new AuditLog(new InMemorySecureStore(), "audit:test");
+    const agent = {
+      platform: "hyperpure" as const,
+      ensureReady: vi.fn().mockResolvedValue(undefined),
+      search: vi.fn().mockResolvedValue(undefined),
+      readQuote: vi.fn(),
+      addToCart: vi.fn(async (line: { skuId: string; qty: number }) =>
+        line.skuId === "hp-potato"
+          ? { status: "added" as const, skuId: line.skuId, qty: line.qty }
+          : { status: "failed" as const, skuId: line.skuId, qty: line.qty, reason: "out of stock" },
+      ),
+    };
+    const failureReporter = { report: vi.fn().mockResolvedValue(undefined) };
+    const driver = new CheckoutDriver({
+      engine: fake.engine,
+      agent,
+      backend: makeBackend(),
+      audit,
+      failureReporter,
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+
+    await driver.stageCart(TWO_LINE);
+
+    expect(failureReporter.report).toHaveBeenCalledTimes(1);
+    expect(failureReporter.report).toHaveBeenCalledWith("hyperpure", {
+      flow: "addToCart",
+      signature: "hp-paneer",
+      reason: "out of stock",
+      url: undefined,
+      domDigest: expect.stringContaining("hyperpure.com/p/paneer"),
+      screenshotBase64: "BASE64PNG",
+      skuId: "hp-paneer",
+      itemName: "paneer",
+    });
+  });
 });
 
 // ----- credit_ok happy path + idempotency -----

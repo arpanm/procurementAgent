@@ -1,62 +1,79 @@
 package ai.procurecopilot.backend.knowledge;
 
 import ai.procurecopilot.backend.common.PlatformId;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
- * In-memory guided-RAG knowledge registry (PROCURE_COPILOT_PLAN.md guided-RAG knowledge layer).
- * Seeds curated extraction policies + hints per platform from {@code classpath:knowledge/{platform}.json}
- * at construction, then lets the device append observations (the "RAG" learnings) which accumulate
- * in memory. Mirrors {@code PlaybookRegistry}: thread-safe via {@link ConcurrentHashMap} keyed by
- * platform, with each platform's appended notes guarded by a synchronized list.
+ * DB-backed guided-RAG knowledge registry (PROCURE_COPILOT_PLAN.md guided-RAG knowledge layer). The
+ * live {@link KnowledgeDoc} for each platform is persisted as canonical camelCase JSON in {@link
+ * KnowledgeDocEntity}, seeded once from {@code classpath:knowledge/{platform}.json} on first boot and
+ * thereafter mutated in place — the device appends observations (the "RAG" learnings) and the eval
+ * pipeline applies token additions / promoted patches. Persisting the whole doc keeps the wire
+ * contract byte-for-byte identical to the frontend half across restarts.
  */
 @Service
 public class KnowledgeService {
 
     private final ObjectMapper mapper;
-    private final Map<PlatformId, KnowledgeDoc> seeds = new ConcurrentHashMap<>();
-    private final Map<PlatformId, List<KnowledgeNote>> notes = new ConcurrentHashMap<>();
+    private final KnowledgeDocRepository repo;
 
-    public KnowledgeService(ObjectMapper mapper) {
+    public KnowledgeService(ObjectMapper mapper, KnowledgeDocRepository repo) {
         this.mapper = mapper;
+        this.repo = repo;
+    }
+
+    /** Seed any platform that has no persisted doc yet from its curated classpath JSON. */
+    @PostConstruct
+    @Transactional
+    public void seed() {
         for (PlatformId platform : PlatformId.values()) {
-            seeds.put(platform, load(platform));
-            notes.put(platform, new ArrayList<>());
+            if (!repo.existsById(platform.wire())) {
+                repo.save(toEntity(loadSeed(platform)));
+            }
         }
     }
 
-    /** The current doc for a platform: seed policies/hints + all appended observations. */
+    /** The current live doc for a platform (seeding lazily if it has never been persisted). */
+    @Transactional
     public KnowledgeDoc get(PlatformId platform) {
-        KnowledgeDoc seed = seeds.get(platform);
-        List<KnowledgeNote> appended = notes.get(platform);
-        List<KnowledgeNote> snapshot;
-        synchronized (appended) {
-            snapshot = new ArrayList<>(appended);
-        }
-        return new KnowledgeDoc(
-                seed.platform(), seed.version(), seed.policies(), seed.hints(), snapshot);
+        return fromEntity(loadOrSeed(platform));
     }
 
-    /** Append an observation to a platform's corpus and return the updated doc. Thread-safe. */
+    /** Append an observation to a platform's corpus and return the updated doc. */
+    @Transactional
     public KnowledgeDoc addObservation(PlatformId platform, String kind, String text) {
-        KnowledgeNote note = new KnowledgeNote(Instant.now().toString(), kind, text);
-        List<KnowledgeNote> appended = notes.get(platform);
-        synchronized (appended) {
-            appended.add(note);
-        }
-        return get(platform);
+        KnowledgeDocEntity entity = loadOrSeed(platform);
+        KnowledgeDoc current = fromEntity(entity);
+        List<KnowledgeNote> notes = new ArrayList<>(current.notes());
+        notes.add(new KnowledgeNote(Instant.now().toString(), kind, text));
+        KnowledgeDoc updated = new KnowledgeDoc(
+                current.platform(), current.version(), current.policies(), current.hints(), notes);
+        entity.update(updated.version(), toJson(updated), Instant.now());
+        repo.save(entity);
+        return updated;
     }
 
-    /** Every platform's current doc. */
+    /** Persist a wholesale replacement doc (used by the eval pipeline when applying patches). */
+    @Transactional
+    public KnowledgeDoc save(PlatformId platform, KnowledgeDoc doc) {
+        KnowledgeDocEntity entity = loadOrSeed(platform);
+        entity.update(doc.version(), toJson(doc), Instant.now());
+        repo.save(entity);
+        return doc;
+    }
+
+    /** Every platform's current live doc. */
+    @Transactional
     public List<KnowledgeDoc> list() {
         List<KnowledgeDoc> all = new ArrayList<>();
         for (PlatformId platform : PlatformId.values()) {
@@ -65,7 +82,33 @@ public class KnowledgeService {
         return all;
     }
 
-    private KnowledgeDoc load(PlatformId platform) {
+    private KnowledgeDocEntity loadOrSeed(PlatformId platform) {
+        return repo.findById(platform.wire())
+                .orElseGet(() -> repo.save(toEntity(loadSeed(platform))));
+    }
+
+    private KnowledgeDocEntity toEntity(KnowledgeDoc doc) {
+        return new KnowledgeDocEntity(doc.platform(), doc.version(), toJson(doc), Instant.now());
+    }
+
+    private KnowledgeDoc fromEntity(KnowledgeDocEntity entity) {
+        try {
+            return mapper.readValue(entity.getDocJson(), KnowledgeDoc.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(
+                    "Corrupt persisted knowledge doc for platform " + entity.getPlatform(), e);
+        }
+    }
+
+    private String toJson(KnowledgeDoc doc) {
+        try {
+            return mapper.writeValueAsString(doc);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize knowledge doc", e);
+        }
+    }
+
+    private KnowledgeDoc loadSeed(PlatformId platform) {
         String path = "knowledge/" + platform.wire() + ".json";
         try (InputStream in = new ClassPathResource(path).getInputStream()) {
             return mapper.readValue(in, KnowledgeDoc.class);

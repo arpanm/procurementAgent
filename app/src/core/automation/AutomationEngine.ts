@@ -116,6 +116,17 @@ export interface AutomationEngine {
    * may omit it.
    */
   detectLoginWall?(): Promise<boolean>;
+
+  /**
+   * Serialize the current page (URL + interactive elements). Optional: the WebView engine implements it;
+   * callers (e.g. the failure reporter) use it for a compact DOM digest and skip it on mocks.
+   */
+  observe?(): Promise<Observation>;
+  /**
+   * Capture a base64 PNG (no `data:` prefix) of the current page. Optional: the WebView engine implements
+   * it; used to attach a screenshot to a failure report for the vision eval. `null` when unavailable.
+   */
+  captureScreenshot?(): Promise<string | null>;
 }
 
 export type { DomainEvent };

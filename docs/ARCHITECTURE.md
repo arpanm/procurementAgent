@@ -57,7 +57,7 @@ flowchart TB
   ORCH -->|HTTP| INT
   ENG -->|/next-action /vision/extract| INT
   ORCH -->|/optimize| OPT
-  ORCH -->|/sessions/{id}/events| SES
+  ORCH -->|/sessions/:id/events| SES
   AG -->|/knowledge| KN
   INT --> LLM
 ```
@@ -145,7 +145,7 @@ flowchart LR
   RED --> STORE["store.ts<br/>(state + listeners)"]
   STORE -->|notify| UI["UI via useSyncExternalStore"]
   ORC --> OUT["outbox (FIFO)"]
-  OUT -->|POST /sessions/{id}/events| BE["backend event log"]
+  OUT -->|POST /sessions/:id/events| BE["backend event log"]
 ```
 
 - `app/src/core/orchestrator/session.ts` — `reduce(state, event)` is a pure switch over `OrchestratorEvent`.
@@ -342,9 +342,9 @@ continuous, automatic learning loop is **TODO**.
 flowchart TB
   subgraph Curated["① Guided knowledge (curated, server-seeded)"]
     SEED["classpath knowledge/{platform}.json<br/>(policies + hints)"] --> KSVC["KnowledgeService<br/>(in-memory, per platform)"]
-    KSVC -->|GET /knowledge/{platform}| KSTORE["PlatformKnowledgeStore (device)<br/>+ built-in defaults"]
+    KSVC -->|GET /knowledge/:platform| KSTORE["PlatformKnowledgeStore (device)<br/>+ built-in defaults"]
     KSTORE --> AG["agents read policies/hints<br/>(e.g. priceFromDetailPage, atcTokens)"]
-    AG -->|POST /knowledge/{platform}/observations| KSVC
+    AG -->|POST /knowledge/:platform/observations| KSVC
   end
   subgraph Memory["② Site memory (durable, on-device, learned)"]
     RUN["successful run<br/>(HyperpureAgent)"] --> LEARN["rememberProductUrl()<br/>rememberLocator(toSignature(el))"]

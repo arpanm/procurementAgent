@@ -41,9 +41,9 @@ import {
   findHyperpureAddButtons,
   findHyperpureProductCard,
   findPlusButtonNear,
-  hyperpureProductUrl,
   hyperpureSearchUrl,
   isHyperpureProductUrl,
+  type HyperpureMatchOpts,
 } from "./selectors";
 
 const PLATFORM = "hyperpure" as const;
@@ -72,6 +72,9 @@ export interface HyperpureAgentDeps {
 /** Upper bound on stepper "+" clicks, so a misread tile can never loop adding forever. */
 const MAX_QTY_CLICKS = 30;
 
+/** How many times to (re-locate + re-)click ADD before declaring an unconfirmed add a failure. */
+const MAX_ADD_ATTEMPTS = 3;
+
 export class HyperpureAgent implements PlatformAgent {
   readonly platform = "hyperpure" as const;
 
@@ -80,6 +83,8 @@ export class HyperpureAgent implements PlatformAgent {
   private readonly cartUrl?: string;
   private readonly hidden: boolean;
   private readonly memory?: SiteMemory;
+  /** Knowledge-derived ADD/added/reject tokens threaded into every selector call (guides, never gates). */
+  private readonly matchOpts: HyperpureMatchOpts;
 
   constructor(deps: HyperpureAgentDeps) {
     this.session = deps.session;
@@ -87,6 +92,11 @@ export class HyperpureAgent implements PlatformAgent {
     this.cartUrl = deps.cartUrl;
     this.hidden = deps.hidden ?? false;
     this.memory = deps.memory;
+    this.matchOpts = {
+      atcTokens: deps.knowledge?.hints.atcTokens,
+      addedTokens: deps.knowledge?.hints.addedTokens,
+      rejectTokens: deps.knowledge?.hints.rejectTokens,
+    };
   }
 
   async ensureReady(): Promise<void> {
@@ -150,44 +160,56 @@ export class HyperpureAgent implements PlatformAgent {
     const detailUrl = this.detailUrlFor(line);
     traceAutomation("think", `▶ addToCart ${line.skuId} ×${line.qty}`, PLATFORM);
     try {
-      let obs = await this.openProductPage(line, detailUrl);
-      let card = this.locateCard(obs, line);
+      // Prefer a REAL product page (learned/captured URL); otherwise add straight from the search
+      // listing, which Hyperpure renders more reliably than a guessed detail slug.
+      let obs: Observation;
+      let card: SerializedElement | null;
+      if (detailUrl) {
+        obs = await this.openProductPage(line, detailUrl);
+        card = this.locateCard(obs, line);
+      } else {
+        obs = await this.session.observe();
+        card = null;
+      }
 
-      // The detail URL is derived from a slug and can miss (it 404s/redirects when the real product path
-      // differs); recover via the search listing, scrolling the virtualized grid until tiles/ADD render.
+      // No card on the detail page (it missed) or no detail page at all → find the product on the search
+      // listing, scrolling the virtualized grid until the matching tile renders.
       if (!card && line.item) {
-        traceAutomation("info", "product not on detail page → falling back to search listing", PLATFORM);
+        traceAutomation(
+          "info",
+          detailUrl ? "product not on detail page → searching listing" : "finding product on search listing",
+          PLATFORM,
+        );
         await this.search(line.item);
         obs = await this.settleListingForAdd(line);
         card = this.locateCard(obs, line);
+
+        // With no known detail URL, open the chosen product's OWN detail page by tapping its tile —
+        // Hyperpure tiles navigate via JS (no <a href>), so this is the only way to reach the canonical
+        // single-ADD page. Adding there is unambiguous (one ADD for the exact SKU, vs. many tiles on the
+        // listing) and yields the real detail URL to hand back / learn. Falls back to listing-add if the
+        // tap doesn't land on a product page.
+        if (card && !detailUrl) {
+          const detailObs = await this.openDetailViaTile(card);
+          if (detailObs) {
+            obs = detailObs;
+            card = this.locateCard(obs, line);
+          }
+        }
       }
 
-      // Find the ADD control: card-nearest is most precise (a listing has many ADDs); else replay a
-      // learned signature; else the first ADD on the page. Memory only ever speeds this up.
-      const memoryButton =
-        !card && this.memory
-          ? matchSignature(obs, this.memory.recallLocators("detail:addToCart"))
-          : null;
-      const addButton =
-        (card ? findAddButtonForCard(obs, card) : null) ??
-        memoryButton ??
-        (findHyperpureAddButtons(obs)[0] ?? null);
       // Hand the user a link that actually resolves: the page we ended on if it's a real product page,
       // else the (reliable) search-results URL — never a guessed slug that bounces to home/cart.
       const handoffUrl = this.handoffUrlFor(line, obs, detailUrl);
-      if (!addButton) {
-        traceAutomation("warn", `no ADD button on ${obs.url}`, PLATFORM);
-        return this.fail(line, "no ADD button found on the product page", handoffUrl);
-      }
-      if (memoryButton && memoryButton.idx === addButton.idx) {
-        traceAutomation("info", `using learned ADD locator @${addButton.idx}`, PLATFORM);
-      }
 
-      traceAutomation("info", `clicking ADD @${addButton.idx} "${addButton.name ?? ""}"`, PLATFORM);
-      await this.session.act({ type: "click", idx: addButton.idx });
-      const after = await this.session.observe();
-      if (!addLooksConfirmed(obs, after, addButton)) {
+      const outcome = await this.clickAddWithRetry(line, obs, card);
+      if (!outcome.confirmed) {
+        if (!outcome.addButton) {
+          traceAutomation("warn", `no ADD button on ${outcome.after.url}`, PLATFORM);
+          return this.fail(line, "no ADD button found on the product page", handoffUrl);
+        }
         traceAutomation("warn", `add not confirmed for ${line.skuId}`, PLATFORM);
+        this.traceAddDiag(outcome.after, outcome.addButton);
         return this.fail(
           line,
           "add-to-cart not confirmed (cart count unchanged and no quantity stepper appeared)",
@@ -196,10 +218,10 @@ export class HyperpureAgent implements PlatformAgent {
       }
 
       traceAutomation("info", `✓ add confirmed; raising to qty ${line.qty}`, PLATFORM);
-      await this.incrementTo(card ?? addButton, line.qty);
+      await this.incrementTo(outcome.card ?? outcome.addButton, line.qty);
 
       // Learn from this confirmed success: the working ADD/card signatures and the URL we ended on.
-      this.learnFromAdd(line, addButton, card, after, handoffUrl);
+      this.learnFromAdd(line, outcome.addButton, outcome.card, outcome.after, handoffUrl);
 
       return {
         status: "added",
@@ -213,11 +235,80 @@ export class HyperpureAgent implements PlatformAgent {
     }
   }
 
+  /**
+   * Click ADD and confirm it took — retrying with a FRESHLY re-located button when it doesn't. Hyperpure
+   * re-renders on load (React hydration mismatch) which can wipe the `data-pc-idx` handle the observe
+   * captured, so a click against a stale idx silently no-ops. Re-observing and re-matching the ADD on the
+   * fresh DOM before the next click is what turns those invisible no-ops into a real add (or an honest
+   * failure). Returns the button/card actually used plus the last observation for diagnostics.
+   */
+  private async clickAddWithRetry(
+    line: CartLineRequest,
+    initialObs: Observation,
+    initialCard: SerializedElement | null,
+  ): Promise<
+    | { confirmed: true; after: Observation; addButton: SerializedElement; card: SerializedElement | null }
+    | { confirmed: false; after: Observation; addButton: SerializedElement | null; card: SerializedElement | null }
+  > {
+    let obs = initialObs;
+    let card = initialCard;
+    let lastAdd: SerializedElement | null = null;
+    for (let attempt = 1; attempt <= MAX_ADD_ATTEMPTS; attempt++) {
+      const addButton = this.resolveAddButton(obs, card);
+      if (!addButton) {
+        // No ADD control anywhere on this page — re-observing can't conjure one.
+        return { confirmed: false, after: obs, addButton: lastAdd, card };
+      }
+      lastAdd = addButton;
+      traceAutomation(
+        "info",
+        attempt === 1
+          ? `clicking ADD @${addButton.idx} "${addButton.name ?? ""}"`
+          : `retry ${attempt}/${MAX_ADD_ATTEMPTS}: re-clicking ADD @${addButton.idx} (fresh locator)`,
+        PLATFORM,
+      );
+      const res = await this.session.act({ type: "click", idx: addButton.idx });
+      if (!res.ok) {
+        traceAutomation("warn", `ADD click @${addButton.idx} reported not-ok${res.reason ? ` (${res.reason})` : ""}`, PLATFORM);
+      }
+      const after = await this.session.observe();
+      if (addLooksConfirmed(obs, after, addButton, this.matchOpts)) {
+        return { confirmed: true, after, addButton, card };
+      }
+      // Not confirmed — the handle may be stale; re-locate the card/ADD on the fresh DOM and try again.
+      obs = after;
+      card = this.locateCard(after, line) ?? card;
+    }
+    return { confirmed: false, after: obs, addButton: lastAdd, card };
+  }
+
+  /**
+   * The ADD control to click: card-nearest is most precise (a listing has many ADDs); else replay a
+   * learned signature; else the first ADD on the page. Memory only ever speeds this up.
+   */
+  private resolveAddButton(obs: Observation, card: SerializedElement | null): SerializedElement | null {
+    const byCard = card ? findAddButtonForCard(obs, card, this.matchOpts) : null;
+    if (byCard) return byCard;
+    const memoryButton = this.memory
+      ? matchSignature(obs, this.memory.recallLocators("detail:addToCart"))
+      : null;
+    if (memoryButton) {
+      traceAutomation("info", `using learned ADD locator @${memoryButton.idx}`, PLATFORM);
+      return memoryButton;
+    }
+    return findHyperpureAddButtons(obs, this.matchOpts)[0] ?? null;
+  }
+
   // --- internals --------------------------------------------------------------------------------
 
   /**
-   * The product DETAIL URL to open: a LEARNED url for this item (highest trust), else a captured
-   * product URL, else one built from the SKU slug.
+   * The product DETAIL URL to open, ONLY when it's a REAL, proven page: a LEARNED url for this item
+   * (highest trust — it produced a confirmed add before) or a captured product URL from quote time.
+   *
+   * We deliberately no longer build a URL from the SKU slug: a guessed slug frequently 404s or bounces
+   * to a stray "explore more" page whose ADD button silently no-ops, which was the source of the
+   * inconsistent "onion opens a listing, paneer opens a detail page, neither adds" behavior. With no
+   * real URL, {@link addToCart} adds from the search listing, which Hyperpure renders far more reliably.
    */
   private detailUrlFor(line: CartLineRequest): string | undefined {
     const canonicalId = canonicalIdOf(line.item);
@@ -227,8 +318,7 @@ export class HyperpureAgent implements PlatformAgent {
       return remembered;
     }
     if (line.productUrl && isHyperpureProductUrl(line.productUrl)) return line.productUrl;
-    if (line.skuId) return hyperpureProductUrl(line.skuId);
-    return line.productUrl;
+    return undefined;
   }
 
   /** Remember the detail-page URL we reached for an item (best-effort; only valid product URLs). */
@@ -270,9 +360,35 @@ export class HyperpureAgent implements PlatformAgent {
     return this.session.observe();
   }
 
+  /**
+   * Open the chosen product's detail page by tapping its listing tile. Hyperpure search tiles are NOT
+   * `<a href>` links (they route via JS and the slug lives only in React state), so tapping the tile is
+   * the only reliable way to reach the product's own page from a listing. Polls a few times for the SPA
+   * route to settle onto a real product URL with an ADD control. Returns the detail observation, or null
+   * when the tap didn't navigate to a product page (caller then adds from the listing instead).
+   */
+  private async openDetailViaTile(card: SerializedElement): Promise<Observation | null> {
+    traceAutomation("info", `opening product detail via tile @${card.idx}`, PLATFORM);
+    await this.session.act({ type: "click", idx: card.idx });
+    let obs = await this.session.observe();
+    for (
+      let i = 0;
+      i < 6 && !(isHyperpureProductUrl(obs.url) && findHyperpureAddButtons(obs, this.matchOpts).length > 0);
+      i++
+    ) {
+      obs = await this.session.observe();
+    }
+    if (isHyperpureProductUrl(obs.url)) {
+      traceAutomation("info", `landed on product detail → ${obs.url}`, PLATFORM);
+      return obs;
+    }
+    traceAutomation("info", "tile tap did not open a product page → adding from listing", PLATFORM);
+    return null;
+  }
+
   /** Match the product tile if we have the original item; on a single-product page the item context is enough. */
   private locateCard(obs: Observation, line: CartLineRequest): SerializedElement | null {
-    return line.item ? findHyperpureProductCard(obs, line.item) : null;
+    return line.item ? findHyperpureProductCard(obs, line.item, this.matchOpts) : null;
   }
 
   /**
@@ -284,7 +400,7 @@ export class HyperpureAgent implements PlatformAgent {
   private async settleListingForAdd(line: CartLineRequest): Promise<Observation> {
     let obs = await this.session.observe();
     for (let i = 0; i < 8; i++) {
-      if (this.locateCard(obs, line) || findHyperpureAddButtons(obs).length > 0) return obs;
+      if (this.locateCard(obs, line) || findHyperpureAddButtons(obs, this.matchOpts).length > 0) return obs;
       await this.session.act({ type: "scroll", dy: 600 });
       obs = await this.session.observe();
     }
@@ -321,6 +437,44 @@ export class HyperpureAgent implements PlatformAgent {
         return;
       }
       await this.session.act({ type: "click", idx: plus.idx });
+    }
+  }
+
+  /**
+   * Debug-only: when an add isn't confirmed, dump the post-click DOM AROUND the ADD button so we can see
+   * what Hyperpure actually rendered (stepper glyphs, quantity badge, cart count) instead of guessing. This
+   * is the add-to-cart analogue of the price-extraction digit-node diagnostic that pinpointed the serializer
+   * gap. Cheap and bounded; only fires on the failure path.
+   */
+  private traceAddDiag(after: Observation, addButton: SerializedElement): void {
+    const ax = addButton.bbox[0] + addButton.bbox[2] / 2;
+    const ay = addButton.bbox[1] + addButton.bbox[3] / 2;
+    const near = after.elements
+      .filter((el) => {
+        const cx = el.bbox[0] + el.bbox[2] / 2;
+        const cy = el.bbox[1] + el.bbox[3] / 2;
+        return Math.abs(cx - ax) < 260 && Math.abs(cy - ay) < 200;
+      })
+      .filter((el) => (el.name ?? "").trim().length > 0 || el.tag === "button");
+    traceAutomation(
+      "info",
+      `add-diag near ADD@${addButton.idx} (${Math.round(ax)},${Math.round(ay)}): ${near.length} element(s)`,
+      PLATFORM,
+    );
+    for (const el of near.slice(0, 16)) {
+      const nm = (el.name ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+      traceAutomation(
+        "info",
+        `  near [${el.idx}] ${el.tag}${el.role ? `/${el.role}` : ""} "${nm}"`,
+        PLATFORM,
+      );
+    }
+    const cartEls = after.elements.filter((el) =>
+      /cart|basket/i.test(`${el.name ?? ""} ${el.attrs.href ?? ""}`),
+    );
+    for (const el of cartEls.slice(0, 4)) {
+      const nm = (el.name ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+      traceAutomation("info", `  cart [${el.idx}] ${el.tag} "${nm}" href=${el.attrs.href ?? ""}`, PLATFORM);
     }
   }
 

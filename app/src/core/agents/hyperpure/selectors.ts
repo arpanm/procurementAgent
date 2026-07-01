@@ -126,6 +126,37 @@ function normalizePack(s: string): string {
   return lower(s).replace(/\s+/g, "");
 }
 
+/** Two elements sit in the SAME product tile (a tight box, so a left-rail chip never reaches the grid). */
+function withinTile(
+  a: readonly [number, number, number, number],
+  b: readonly [number, number, number, number],
+): boolean {
+  const ca = center(a);
+  const cb = center(b);
+  return Math.abs(ca.x - cb.x) < 220 && Math.abs(ca.y - cb.y) < 140;
+}
+
+/**
+ * Is this token-matching element a real BUYABLE tile rather than a category-rail chip? Hyperpure's
+ * search results open with a left rail of category chips ("Malai Paneer", "Fresh Paneer", …) whose text
+ * matches the item just as well as a product tile — clicking one navigates to a category, never adds. A
+ * buyable tile always carries price/heading/ADD context: a ₹ price in its own text, a product-title
+ * heading tag, or an ADD control / ₹ price physically inside the same tile. Chips have none of these.
+ */
+function hasBuyableContext(
+  obs: Observation,
+  el: SerializedElement,
+  atc: readonly string[],
+): boolean {
+  if (RUPEE_RE.test(el.name)) return true;
+  if (el.tag === "h1" || el.tag === "h2" || el.tag === "h3") return true;
+  return obs.elements.some((o) => {
+    if (o === el || !withinTile(o.bbox, el.bbox)) return false;
+    const nm = (o.name ?? "").trim();
+    return RUPEE_RE.test(nm) || (isClickable(o) && isAddLabel(nm, atc));
+  });
+}
+
 /**
  * Find the product CARD/title best matching a requested item on a listing or detail page.
  *
@@ -133,22 +164,32 @@ function normalizePack(s: string): string {
  * element, so we require every token of the item name to be present, then reward the brand and pack size
  * (this is what disambiguates "Milky Mist - Paneer, 1 Kg" from "Milky Mist - Spicy Paneer Sticks, 500 gm")
  * and a visible ₹ price (a real buyable tile, not a category chip).
+ *
+ * Category-rail chips match the item text too, so we require {@link hasBuyableContext} before a candidate
+ * can win — otherwise a "Malai Paneer" category chip beats the real tile and the add silently no-ops.
  */
 export function findHyperpureProductCard(
   obs: Observation,
   item: RequestedItem,
+  opts: HyperpureMatchOpts = {},
 ): SerializedElement | null {
   const tokens = nameTokens(item.name);
   if (tokens.length === 0) return null;
   const brand = item.brand ? lower(item.brand) : "";
   const pack = item.packSize ? normalizePack(item.packSize) : "";
+  const reject = cleanTokens(opts.rejectTokens);
+  const atc = cleanTokens(opts.atcTokens);
 
   let best: SerializedElement | null = null;
   let bestScore = 0;
   for (const el of obs.elements) {
     const text = lower(el.name);
     if (!text) continue;
+    // Knowledge-driven reject tokens (e.g. "sponsored") drop a tile before it can win the match.
+    if (reject.length > 0 && reject.some((tok) => text.includes(tok))) continue;
     if (!tokens.every((tok) => text.includes(tok))) continue;
+    // Exclude category-rail chips: only a real buyable tile (price/heading/ADD context) may win.
+    if (!hasBuyableContext(obs, el, atc)) continue;
 
     let score = 2;
     if (brand && text.includes(brand)) score += 3;
@@ -168,9 +209,37 @@ export function findHyperpureProductCard(
 // "ADD", "ADD +", "Add to cart" / "Add to basket" — the buyable controls on Hyperpure tiles & detail pages.
 const ADD_LABEL_RE = /^(add(\s*\+)?|add\s+to\s+(cart|basket))$/i;
 
+/**
+ * Optional guided-RAG knowledge hints that EXTEND (never replace) the built-in Hyperpure matchers.
+ * `atcTokens`/`addedTokens` are matched as EXACT button labels (Hyperpure labels are exact, e.g. "ADD +",
+ * so substring-OR would wrongly match "address"); `rejectTokens` are matched as substrings of tile text.
+ */
+export interface HyperpureMatchOpts {
+  readonly atcTokens?: readonly string[];
+  readonly addedTokens?: readonly string[];
+  readonly rejectTokens?: readonly string[];
+}
+
+function cleanTokens(tokens: readonly string[] | undefined): string[] {
+  return (tokens ?? []).map((t) => t.trim().toLowerCase()).filter((t) => t.length > 0);
+}
+
+/** True when a control's label matches the base ADD regex OR is exactly one of the knowledge atc tokens. */
+function isAddLabel(name: string, atcTokens: readonly string[]): boolean {
+  const t = name.trim();
+  if (ADD_LABEL_RE.test(t)) return true;
+  if (atcTokens.length === 0) return false;
+  const lc = t.toLowerCase();
+  return atcTokens.includes(lc);
+}
+
 /** All buyable "ADD" controls currently on the page. */
-export function findHyperpureAddButtons(obs: Observation): SerializedElement[] {
-  return obs.elements.filter((el) => isClickable(el) && ADD_LABEL_RE.test((el.name ?? "").trim()));
+export function findHyperpureAddButtons(
+  obs: Observation,
+  opts: HyperpureMatchOpts = {},
+): SerializedElement[] {
+  const atc = cleanTokens(opts.atcTokens);
+  return obs.elements.filter((el) => isClickable(el) && isAddLabel(el.name ?? "", atc));
 }
 
 function center(b: readonly [number, number, number, number]): { x: number; y: number } {
@@ -194,14 +263,20 @@ function manhattan(
 export function findAddButtonForCard(
   obs: Observation,
   card: SerializedElement,
+  opts: HyperpureMatchOpts = {},
 ): SerializedElement | null {
-  const buttons = findHyperpureAddButtons(obs);
+  const buttons = findHyperpureAddButtons(obs, opts);
   if (buttons.length === 0) return null;
   return [...buttons].sort((p, q) => manhattan(p.bbox, card.bbox) - manhattan(q.bbox, card.bbox))[0];
 }
 
 const PLUS_RE = /^[+\u2795]$/;
-const MINUS_RE = /^[-\u2212\u2013\u2014]$/;
+
+// A stepper's increment/decrement controls aren't always a bare "+"/"\u2212" text node \u2014 Hyperpure also
+// renders them as icon buttons whose accessible name reads "increase"/"add more" / "decrease"/"remove".
+// Matching these as well is what lets `addLooksConfirmed` see the stepper that proves the add took.
+const INC_RE = /^[+\u2795]$|\b(increase|increment|add more|plus)\b/i;
+const DEC_RE = /^[-\u2212\u2013\u2014]$|\b(decrease|decrement|remove|minus|delete)\b/i;
 
 /** The "+" stepper button nearest an anchor (for incrementing quantity after the first add). */
 export function findPlusButtonNear(
@@ -223,11 +298,27 @@ export function findPlusButtonNear(
  * badge isn't legible (so callers fall back to the stepper signal instead of trusting a phantom 0).
  */
 export function readCartCount(obs: Observation): number | null {
+  const cartEls: SerializedElement[] = [];
   for (const el of obs.elements) {
     const hay = lower(`${el.name} ${el.attrs.name ?? ""} ${el.attrs.href ?? ""}`);
     if (!/cart|basket/.test(hay)) continue;
     const m = (el.name ?? "").match(/\b(\d{1,3})\b/);
     if (m) return parseInt(m[1], 10);
+    cartEls.push(el);
+  }
+  // The count often renders as a SEPARATE badge node beside the cart icon rather than inside a
+  // cart-labelled element (Hyperpure: `<strong>1</strong>` is a sibling of `<img alt="Cart icon">`).
+  // So when no cart-labelled element carried a digit, read the nearest bare-integer node to a cart
+  // affordance — this is what makes the null→1 "item entered the cart" confirmation actually fire.
+  for (const cart of cartEls) {
+    let best: { n: number; d: number } | null = null;
+    for (const el of obs.elements) {
+      const t = (el.name ?? "").trim();
+      if (!/^\d{1,3}$/.test(t)) continue;
+      const d = manhattan(el.bbox, cart.bbox);
+      if (d <= 140 && (best === null || d < best.d)) best = { n: parseInt(t, 10), d };
+    }
+    if (best) return best.n;
   }
   return null;
 }
@@ -242,21 +333,38 @@ export function addLooksConfirmed(
   before: Observation,
   after: Observation,
   addButton: SerializedElement,
+  opts: HyperpureMatchOpts = {},
 ): boolean {
   const beforeCount = readCartCount(before);
   const afterCount = readCartCount(after);
   if (beforeCount != null && afterCount != null && afterCount > beforeCount) return true;
+  // A cart count that appears (null → number ≥ 1) after the add is just as good a signal as a rise.
+  if (beforeCount == null && afterCount != null && afterCount >= 1) return true;
 
   const near = (el: SerializedElement): boolean => {
     const c = center(el.bbox);
     const a = center(addButton.bbox);
-    return Math.abs(c.x - a.x) < 220 && Math.abs(c.y - a.y) < 140;
+    return Math.abs(c.x - a.x) < 240 && Math.abs(c.y - a.y) < 160;
   };
-  const hasPlus = after.elements.some(
-    (el) => isClickable(el) && PLUS_RE.test((el.name ?? "").trim()) && near(el),
-  );
-  const hasMinus = after.elements.some(
-    (el) => isClickable(el) && MINUS_RE.test((el.name ?? "").trim()) && near(el),
-  );
-  return hasPlus && hasMinus;
+  const trimmed = (el: SerializedElement): string => (el.name ?? "").trim();
+
+  // Knowledge-driven confirmation: a learned "added"/"in cart" phrasing appearing near where ADD was is a
+  // trustworthy signal the platform-specific stepper detection below might not have a built-in pattern for.
+  const addedTokens = cleanTokens(opts.addedTokens);
+  if (
+    addedTokens.length > 0 &&
+    after.elements.some((el) => near(el) && addedTokens.some((tok) => trimmed(el).toLowerCase().includes(tok)))
+  ) {
+    return true;
+  }
+
+  // The trustworthy signal: ADD swaps to a "− qty +" stepper. Accept bare +/− text OR icon buttons
+  // labelled increase/decrease, near where ADD was. We deliberately do NOT treat "ADD gone + a bare
+  // number appeared" as a confirmation on its own — a navigation or re-layout can leave a stray integer
+  // near the old spot, which produced phantom "added" successes for items that never entered the cart.
+  const hasInc = after.elements.some((el) => isClickable(el) && INC_RE.test(trimmed(el)) && near(el));
+  const hasDec = after.elements.some((el) => isClickable(el) && DEC_RE.test(trimmed(el)) && near(el));
+  if (hasInc && hasDec) return true;
+
+  return false;
 }

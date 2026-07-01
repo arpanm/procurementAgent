@@ -1,9 +1,20 @@
 spring:
   application:
     name: procure-copilot-backend
+  # Guided-RAG persistence (live knowledge docs, failure logs, eval runs, pending patches).
+  # Defaults to a local H2 file DB so state survives restarts; override the three properties
+  # below (e.g. SPRING_DATASOURCE_URL=jdbc:postgresql://…) to point at Postgres in production.
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:file:./data/procure;AUTO_SERVER=TRUE}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  jpa:
+    hibernate:
+      ddl-auto: ${SPRING_JPA_DDL_AUTO:update}
+    open-in-view: false
 
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
 
 management:
   endpoints:

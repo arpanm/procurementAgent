@@ -24,6 +24,7 @@ import { createEngine } from "../../core/adapters";
 import { CheckoutDriver } from "../../core/checkout/CheckoutDriver";
 import { agentForEngine } from "../../core/agents/AgentRegistry";
 import { DefaultKnowledgeStore } from "../../core/knowledge/PlatformKnowledgeStore";
+import { BackendFailureReporter } from "../../core/knowledge/failureReporter";
 import { SiteMemory } from "../../core/knowledge/siteMemory";
 import { defaultPlatformPins } from "../../core/optimizer/defaultSelection";
 import { AuditLog } from "../../core/audit/AuditLog";
@@ -215,9 +216,20 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
   );
   const intentClient = useMemo(() => new IntentClient(backend), [backend]);
   const audit = useMemo(() => new AuditLog(new InMemorySecureStore()), []);
-  // Guided-RAG knowledge: curated per-platform policies/hints that steer each agent. Uses safe built-in
-  // defaults (offline-safe); the backend `/knowledge` endpoint is the source of truth a transport can add.
-  const knowledgeStore = useMemo(() => new DefaultKnowledgeStore(), []);
+  // Guided-RAG knowledge: curated per-platform policies/hints that steer each agent. Backed by the
+  // backend `/knowledge` endpoint via the client's shared transport (resolved-base + timeout), and always
+  // falls back to safe built-in defaults when the backend is unreachable.
+  const knowledgeStore = useMemo(
+    () => new DefaultKnowledgeStore({ transport: backend.knowledgeTransport?.() }),
+    [backend],
+  );
+  // Ships rate-limited failure reports (≤1/hr per platform|flow|signature) to the backend eval flow, so
+  // recurring failures can drive knowledge-doc patches. Demo mode has no real failures to learn from.
+  const failureReporter = useMemo(() => {
+    if (isDemo) return undefined;
+    const transport = backend.knowledgeTransport?.();
+    return transport ? new BackendFailureReporter(transport) : undefined;
+  }, [backend, isDemo]);
 
   const bridgeRef = useRef<InAppBrowserBridge | null>(null);
   const enginesRef = useRef<Map<PlatformId, AutomationEngine>>(new Map());
@@ -487,6 +499,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         audit,
         onEvent,
         awaitHuman,
+        failureReporter,
         items: orchestrator.getState().items,
         productUrls,
         showWebView,

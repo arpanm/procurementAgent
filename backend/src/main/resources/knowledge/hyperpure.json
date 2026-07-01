@@ -1,6 +1,6 @@
 {
   "platform": "hyperpure",
-  "version": 1,
+  "version": 2,
   "policies": {
     "priceFromDetailPage": false,
     "trustListingPrice": true
@@ -8,9 +8,15 @@
   "hints": {
     "rejectTokens": ["sponsored"],
     "processedVariantTokens": [],
-    "atcTokens": ["add"],
-    "addedTokens": ["added", "in cart"],
-    "searchNotes": ["Hyperpure grid is virtualized; read the listing via screenshot+vision."]
+    "atcTokens": ["add", "add +"],
+    "addedTokens": ["added", "in cart", "increase", "decrease", "remove", "qty"],
+    "searchNotes": [
+      "Hyperpure grid is virtualized; read the listing via screenshot+vision.",
+      "Add-to-cart: each product tile (listing) and the product detail page carry a red 'ADD +' control. Both the listing tile and the detail page can add the item — the listing tile is the more reliable target because the detail-page slug is often guessed and 404s.",
+      "After a successful ADD, the 'ADD +' control is replaced IN PLACE by a quantity stepper '− <qty> +'. Confirm the add by the stepper appearing (or the header cart badge incrementing), NOT by assuming the click worked.",
+      "Raise quantity by clicking the stepper '+' (qty − 1) more times; the '+'/'−' may render as icon buttons (accessible name 'increase'/'decrease') rather than literal '+'/'−' glyphs.",
+      "The detail page also shows tiered-pricing rows ('₹X/kg for N kgs+  Add N'). Those 'Add N' buttons jump straight to a bulk quantity; the plain bottom 'ADD' adds the base pack — prefer the plain ADD for an exact-quantity order."
+    ]
   },
   "notes": []
 }

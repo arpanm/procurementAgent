@@ -11,6 +11,7 @@ import type {
   RequestedItem,
 } from "../domain/types";
 import type { EngineAction, Observation } from "../automation/AutomationEngine";
+import type { KnowledgeTransport } from "../knowledge/PlatformKnowledgeStore";
 import { isAutomationDebug, traceAutomation } from "../debug/automationDebug";
 
 /**
@@ -155,6 +156,12 @@ export interface BackendClient {
   appendEvent(sessionId: string, event: unknown): Promise<void>;
   createSession(req: unknown): Promise<{ id: string }>;
   getSession(sessionId: string): Promise<unknown>;
+  /**
+   * Expose a generic JSON transport (resolved-base + timeout + logging) for the guided-RAG knowledge
+   * and eval endpoints (`/knowledge/...`, `/eval/...`). Optional so mock/test clients can omit it; the
+   * knowledge store and failure reporter degrade to defaults/no-op when it's absent.
+   */
+  knowledgeTransport?(): KnowledgeTransport;
 }
 
 /** Minimal fetch transport used by the HTTP implementation; mockable in tests. */
@@ -402,5 +409,13 @@ export class HttpBackendClient implements BackendClient {
 
   getSession(sessionId: string): Promise<unknown> {
     return this.get<unknown>(`/sessions/${sessionId}`);
+  }
+
+  /** A {@link KnowledgeTransport} over this client's resolved-base, timeout-guarded GET/POST. */
+  knowledgeTransport(): KnowledgeTransport {
+    return {
+      get: (path) => this.get<unknown>(path),
+      post: (path, body) => this.post<unknown>(path, body),
+    };
   }
 }

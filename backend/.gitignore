@@ -1,0 +1,5 @@
+target/
+# Local H2 file DB for guided-RAG persistence (knowledge docs, failure logs, eval runs).
+data/
+*.mv.db
+*.trace.db

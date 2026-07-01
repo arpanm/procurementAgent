@@ -1249,6 +1249,14 @@ export class WebViewAutomationEngine implements AutomationEngine {
       `[${el.idx}] ${el.tag}${el.role ? `/${el.role}` : ""} "${el.name.slice(0, 80)}"${el.attrs.href ? ` href=${el.attrs.href.slice(0, 40)}` : ""}`;
     for (const el of named.slice(0, 4)) this.trace("info", `  named ${sample(el)}`);
     for (const el of priced.slice(0, 4)) this.trace("info", `  priced ${sample(el)}`);
+    // When tiles are named but carry no recognized currency (priced=0), the price is likely rendered as
+    // bare digits (rupee glyph via CSS/icon). Dump digit-bearing nodes so we can see the REAL price markup
+    // and tune the extractor against it instead of guessing.
+    if (both.length === 0 && named.length > 0) {
+      const digity = obs.elements.filter((el) => /\d/.test(el.name) && el.name.length <= 40);
+      this.trace("info", `extract-diag digit-nodes: ${digity.length}`);
+      for (const el of digity.slice(0, 12)) this.trace("info", `  digit ${sample(el)}`);
+    }
   }
 
   /**

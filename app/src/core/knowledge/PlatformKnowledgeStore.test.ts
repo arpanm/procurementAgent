@@ -55,7 +55,7 @@ describe("DefaultKnowledgeStore.getKnowledge", () => {
     const doc = await store.getKnowledge("hyperpure");
 
     expect(doc.platform).toBe("hyperpure");
-    expect(doc.version).toBe(1);
+    expect(doc.version).toBe(2);
     expect(doc.policies.trustListingPrice).toBe(true);
   });
 

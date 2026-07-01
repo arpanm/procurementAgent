@@ -35,6 +35,8 @@ import type {
 } from "../domain/types";
 import type { AuditLog } from "../audit/AuditLog";
 import type { PlatformAgent } from "../agents/PlatformAgent";
+import type { FailureReporter } from "../knowledge/failureReporter";
+import { digestObservation } from "../knowledge/failureDigest";
 import { LegacyAgent } from "../agents/LegacyAgent";
 import { InMemorySecureStore } from "../secure/SecureStore";
 import { VerifierClient } from "./VerifierClient";
@@ -77,6 +79,12 @@ export interface CheckoutDriverDeps {
   readonly agent?: PlatformAgent;
   /** Sink for domain events; wire `orchestrator.ingest` to fold them into the session. */
   readonly onEvent?: DomainEventListener;
+  /**
+   * Optional guided-RAG failure sink. When a line fails to stage, the driver ships a rate-limited failure
+   * report (url + DOM digest + screenshot + reason) so the backend eval flow can mine recurring failures
+   * and propose knowledge patches. Absent → no reporting (the default for engine-only callers/tests).
+   */
+  readonly failureReporter?: FailureReporter;
   /** Override the verifier (e.g. with a price tolerance); defaults to one wrapping `backend`. */
   readonly verifier?: VerifierClient;
   /** Override the idempotency guard; defaults to an in-memory-backed one. */
@@ -99,6 +107,7 @@ export class CheckoutDriver {
   private readonly cartUrl?: string;
   private readonly agent?: PlatformAgent;
   private readonly onEvent?: DomainEventListener;
+  private readonly failureReporter?: FailureReporter;
   private readonly verifier: VerifierClient;
   private readonly idempotency: IdempotencyStore;
   private readonly awaitHuman: () => Promise<void>;
@@ -115,6 +124,7 @@ export class CheckoutDriver {
     this.cartUrl = deps.cartUrl;
     this.agent = deps.agent;
     this.onEvent = deps.onEvent;
+    this.failureReporter = deps.failureReporter;
     this.verifier = deps.verifier ?? new VerifierClient(deps.backend);
     this.idempotency =
       deps.idempotency ?? new IdempotencyStore(new InMemorySecureStore());
@@ -368,6 +378,8 @@ export class CheckoutDriver {
           after: { platform, skuId: line.skuId, reason: result.reason ?? "add failed", productUrl: resolvedUrl },
           at: this.now(),
         });
+        this.emit({ type: "StepFailed", platform, step: "addToCart", reason: result.reason ?? "add failed" });
+        await this.reportStagingFailure(platform, line.skuId, line.itemName, result.reason, resolvedUrl);
       }
     }
 
@@ -390,6 +402,51 @@ export class CheckoutDriver {
       stagedLineCount: added,
       stagedLines,
     };
+  }
+
+  /**
+   * Best-effort ship a guided-RAG failure report for a line that failed to stage. Captures a DOM digest
+   * and a screenshot from the engine when it supports them, signed by the skuId so the same recurring
+   * failure dedupes under the reporter's ≤1/hr cooldown. Never throws — reporting can't break staging.
+   */
+  private async reportStagingFailure(
+    platform: PlatformId,
+    skuId: string,
+    itemName: string,
+    reason: string | undefined,
+    url: string | undefined,
+  ): Promise<void> {
+    if (!this.failureReporter) return;
+    try {
+      let domDigest: string | undefined;
+      let screenshotBase64: string | undefined;
+      if (this.engine.observe) {
+        try {
+          domDigest = digestObservation(await this.engine.observe());
+        } catch {
+          /* digest is advisory */
+        }
+      }
+      if (this.engine.captureScreenshot) {
+        try {
+          screenshotBase64 = (await this.engine.captureScreenshot()) ?? undefined;
+        } catch {
+          /* screenshot is advisory */
+        }
+      }
+      await this.failureReporter.report(platform, {
+        flow: "addToCart",
+        signature: skuId,
+        reason: reason ?? "add failed",
+        url,
+        domDigest,
+        screenshotBase64,
+        skuId,
+        itemName,
+      });
+    } catch {
+      // The reporter is itself best-effort, but guard here too so nothing in staging can ever throw.
+    }
   }
 
   /**
