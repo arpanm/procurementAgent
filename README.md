@@ -11,9 +11,11 @@ user to review and check out (OTP/payment is **always** the human — no code pa
 > code is retained for re-enablement — the active set is the one-line `ACTIVE_PLATFORMS` in
 > `app/src/core/config.ts` (override with `VITE_ACTIVE_PLATFORMS`).
 
-This repo implements **Epics 0–6** of [`PROCURE_COPILOT_PLAN.md`](./PROCURE_COPILOT_PLAN.md) (the MVP),
-plus a per-platform agent split, true-price reads, quantity reconciliation, a guided-knowledge layer +
-durable on-device site memory, a candidate / nearby-SKU picker, a first-run login gate, and a cart hand-off.
+This repo implements **Epics 0–6** of [`PROCURE_COPILOT_PLAN.md`](./PROCURE_COPILOT_PLAN.md) (the MVP), plus
+a per-platform agent split, true-price reads, quantity reconciliation, a candidate / nearby-SKU picker, a
+first-run login gate, a cart hand-off, and a **guided-RAG self-improvement loop** — three layers (curated
+per-platform knowledge, durable on-device site memory, and a backend failure→eval→patch loop with
+hybrid-by-risk apply, persisted in JPA/H2).
 
 > 📐 **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** is the detailed architecture reference — diagrams,
 > flowcharts and code links for the UI/WebView layer, per-platform login, intent classification, the RAG /
@@ -40,11 +42,13 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   detail-page add with add/confirm), or the behavior-neutral `LegacyAgent` (used by the demo mock).
 - `adapters/` — **Epic 3** shared playbooks, selectors, recorded fixtures, engine factory + health/self-heal
   (the per-platform agents in `agents/` now own the divergent Amazon/Hyperpure strategy).
-- `knowledge/` — **guided-RAG knowledge layer + durable site memory**: `PlatformKnowledgeStore`
-  (`getKnowledge`/`recordObservation`, backend transport + built-in `defaults`) feeds agents per-platform
-  policies/hints (e.g. `policies.priceFromDetailPage`, `hints.atcTokens`); `siteMemory.ts` + `signature.ts`
-  learn durable product URLs + element signatures (search box / product card / ADD button) from successful
-  runs (localStorage) and are tried before vision/Claude.
+- `knowledge/` — **guided-RAG knowledge layer + durable site memory + failure reporter**:
+  `PlatformKnowledgeStore` (`getKnowledge`/`recordObservation`, backend transport + built-in `defaults`) feeds
+  agents per-platform policies/hints (e.g. `policies.priceFromDetailPage`, `hints.atcTokens`) via
+  `tokenMatcher.buildTokenMatcher`; `siteMemory.ts` + `signature.ts` learn durable product URLs + element
+  signatures (search box / product card / ADD button) from successful runs (localStorage) and are tried before
+  vision/Claude; `failureReporter.ts` + `failureDigest.ts` ship a bounded failure report (rate-limited ≤1/hr
+  per signature, no raw DOM) to the backend eval loop when an add fails.
 - `intent/` — **Epic 1** device-side scrubber, intent client, editable item-list model, i18n (en/hi/bn).
 - `optimizer/` + `pricing/` + `orchestrator/` — **Epics 4/5** event-sourced `ProcurementSession`,
   single-writer `Orchestrator` with a durable outbox, optimizer client + rupee explanation;
@@ -66,10 +70,18 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
 - `agent/` — **Epic 1/2/6** `/intent`, `/plan`, `/next-action` (grounding), `/verify` (cart-vs-plan
   Verifier), `/vision/extract` (screenshot price read).
 - `knowledge/` — **guided-RAG** `/knowledge/{platform}` (curated policies + hints) and
-  `/knowledge/{platform}/observations` (append a runtime note); the device falls back to built-in defaults.
+  `/knowledge/{platform}/observations`; now **DB-backed and versioned** (`KnowledgeDocEntity`), seeded from
+  `resources/knowledge/{platform}.json` on first boot; the device falls back to built-in defaults.
+- `eval/` — **Epic 7 self-improvement loop**: `/eval/{platform}/failures` (ingest a device failure),
+  `/eval/{platform}/run` + `/runs`, `/eval/{platform}/pending` + `/pending/{id}/{promote,reject}`.
+  `FailureLogService` (signature dedup + 24h repeat detection), `EvalTriggerService` (`REPEATING_FAILURE` /
+  daily cron / `MANUAL`), `RagEvalService` (Claude → `KnowledgePatch`, additions auto-applied, removals/policy
+  flips gated as `PendingPatch`). Persisted in `failure_log` / `eval_run` / `pending_patch`.
 - `playbook/` — **Epic 0/3** playbook registry (`/playbooks/...`).
 - `session/` — **Epic 0/5/6** durable event store + SSE (`/sessions...`).
 - `telemetry/` — **Epic 0/7** step traces + audit.
+- Persistence: **Spring Data JPA** over an **H2 file DB** by default (`./data/procure`, `ddl-auto: update`),
+  swappable to **Postgres** via `SPRING_DATASOURCE_URL` (driver already on the classpath).
 
 ### Key capabilities (current implementation)
 
@@ -80,9 +92,18 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   it extracts the ASIN for a canonical `/dp/<ASIN>` URL.
 - **Reliable Hyperpure search & add.** `HyperpureAgent` navigates **straight to the results URL**
   (`/in/search/<slug>?type=SEARCH&query=…`, via `hyperpureSearchUrl`) instead of typing + a synthetic Enter
-  that never fired autosuggest; add-to-cart opens the **detail page** (`/in/<slug>`, via
-  `hyperpureProductUrl`), clicks ADD and **confirms** via the ADD→stepper swap or a cart-count rise, falling
-  back to the listing and returning `failed` + a product link for an honest manual hand-off.
+  that never fired autosuggest. Add-to-cart prefers the product's **own detail page**: it uses a learned or
+  captured URL when it has one, and otherwise (Hyperpure tiles are **not** `<a href>` links — the slug lives
+  only in React state) **taps the matched tile to navigate** to `/in/<slug>?source=SEARCH_ALL`, then adds
+  there (`openDetailViaTile`), falling back to the listing tile if the tap doesn't navigate. The **click**
+  itself was the real add-to-cart bug: Hyperpure binds ADD's `onClick` to an **inner `<span>` inside the
+  `<button>`**, so a gesture dispatched on the button bubbled *up* and never fired the child's handler (silent
+  no-op). The fix dispatches the touch/pointer/mouse/click on the **deepest element at the tap point**
+  (`elementFromPoint`) so React's delegated handler fires; `clickAddWithRetry` then re-locates on the fresh
+  DOM up to 3× (React #418 hydration can wipe the element handle) and **confirms** via a cart-count
+  rise/appearance (reading the badge that sits *beside* the cart icon) or the ADD→stepper swap. A genuine
+  failure returns `failed` + an honest product/search link **and** files a failure report to the backend RAG
+  loop (below). Verified live on-device end-to-end.
 - **Quantity reconciliation** (`pricing/quantityReconcile.ts`): the requested total demand is reconciled to
   each platform's sold pack size — `ceil(totalRequested / soldPackSize)` (10 kg → 50×200 g / 40×250 g /
   20×500 g / 10×1 kg / 5×2 kg / 2×5 kg / 1×10 kg; works for litres/ml too) — wired through
@@ -93,12 +114,19 @@ backend/    Spring Boot 3.4 (Java 21, Maven) — Anthropic proxy, agent brain, o
   returns a **ranked top-N** (`/vision/extract` → `candidates[]`); each is classified `exact`/`nearby` and the
   cheapest exact ₹/unit is auto-picked. When the default pick is only a `nearby` match, the comparison page
   shows an inline "choose a nearby SKU" picker (`select-sku` → re-optimize) so you pick without leaving the app.
-- **Guided-knowledge layer + site memory** (`knowledge/`): curated per-platform policies/hints steer the
-  agents (e.g. Amazon `priceFromDetailPage`, add-to-cart token hints), served by the backend with built-in
-  offline defaults. A durable on-device **`SiteMemory`** also learns product URLs + element signatures from
-  successful runs and tries them before vision/Claude (`HyperpureAgent.learnFromAdd`/`recallProductUrl`).
-  Continuous on-device learning that folds observations back into extraction automatically is **planned/partial**
-  (`recordObservation` exists; the persistent learning loop is not yet wired).
+- **Guided-knowledge layer + site memory + a closed self-improvement loop** (`knowledge/` + backend `eval/`):
+  three RAG layers, all per-platform. **(1)** Curated policies/hints steer the agents (e.g. Amazon
+  `priceFromDetailPage`, `atcTokens`/`addedTokens`/`rejectTokens`), served by the backend (now **DB-backed and
+  versioned**) with built-in offline defaults; agents fold the tokens into their matchers via
+  `buildTokenMatcher` (guidance, never a gate). **(2)** A durable on-device **`SiteMemory`** learns product
+  URLs + element signatures from successful runs and tries them before heuristics/vision
+  (`HyperpureAgent.learnFromAdd`/`recallProductUrl`/`matchSignature`). **(3)** A **closed loop**: when a line
+  fails to add, the device files a bounded failure report (`failureReporter` + `failureDigest`, rate-limited,
+  no raw DOM) to `POST /eval/{platform}/failures`; the backend dedupes by signature, and on a repeat (or the
+  daily cron / a manual run) `RagEvalService` asks Claude for the smallest **`KnowledgePatch`** — **additions
+  auto-apply** (they only widen recognition), while **removals / policy-flips are gated** as a `PendingPatch`
+  for a human to promote/reject. The next run fetches the updated doc, closing the loop with no app release.
+  See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §4 for the full flow and how to operate it.
 - **First-run login gate** (`auth/loginStore.ts` + `ui/pages/LoginGate.tsx`): the user manually signs in to
   each active platform's WebView (OTP + delivery location) once; only a per-platform boolean is persisted —
   never credentials/OTPs. The chat is gated until every `ACTIVE_PLATFORMS` entry is confirmed (demo mode skips it).
@@ -131,6 +159,10 @@ never shipped to the app or logged). Defaults are in `backend/src/main/resources
 | `ANTHROPIC_MAX_TOKENS` | `2048` | Max output tokens per call. |
 | `SERVER_PORT` | `8080` | HTTP port (Spring `server.port`). |
 | `PROCURE_OPTIMIZER_PRICE_TOLERANCE` | `0.05` | Price drift the Verifier tolerates between approved plan and live cart. |
+| `SPRING_DATASOURCE_URL` | `jdbc:h2:file:./data/procure;AUTO_SERVER=TRUE` | Persistence for the guided-RAG loop (failure log / eval runs / patches / knowledge docs). Point at Postgres for production (`jdbc:postgresql://…`); the driver is already bundled. |
+| `SPRING_DATASOURCE_USERNAME` / `SPRING_DATASOURCE_PASSWORD` | `sa` / _(empty)_ | DB credentials (used for Postgres). |
+| `SPRING_JPA_DDL_AUTO` | `update` | Schema management (`update` keeps data across restarts; tests use `create-drop` on in-memory H2). |
+| `PROCURE_EVAL_DAILY_CRON` | `0 0 3 * * *` | When the daily eval sweep runs (all platforms). |
 
 > **Note:** even with `ANTHROPIC_STUB_MODE=false`, the backend automatically falls back to stub mode if
 > no key is present, so it never crashes for a missing key.
@@ -362,11 +394,33 @@ editable item card, and the platform search uses them to find the specific SKU. 
 set `ANTHROPIC_API_KEY` + `ANTHROPIC_STUB_MODE=false` and **restart the backend** (a running server keeps
 its old config/parser until restarted).
 
+## Guided-RAG self-improvement loop (operating it)
+
+The device files a bounded failure report to the backend whenever a line fails to add
+(`POST /eval/{platform}/failures`, rate-limited on-device, disabled in demo). The backend dedupes by
+signature and, on a repeat (≥2 of the same signature in 24 h), the daily 3 AM cron, or a manual trigger, runs
+an eval pass: Claude proposes the smallest `KnowledgePatch`; **additions auto-apply**, while **removals /
+policy-flips are gated** for a human. Everything persists in the DB (H2 file by default), so the log, runs,
+patches and knowledge docs survive restarts. Operate/inspect it with plain HTTP (`{platform}` = `hyperpure`):
+
+```bash
+curl -X POST http://localhost:8080/eval/hyperpure/run     # run an eval pass now
+curl http://localhost:8080/eval/hyperpure/runs            # recent runs (applied vs gated)
+curl http://localhost:8080/eval/hyperpure/pending         # risky patches awaiting a verdict
+curl -X POST http://localhost:8080/eval/hyperpure/pending/42/promote   # apply a gated patch
+curl -X POST http://localhost:8080/eval/hyperpure/pending/42/reject    # discard it
+curl http://localhost:8080/knowledge/hyperpure            # the curated doc the device fetches
+```
+
+With `ANTHROPIC_STUB_MODE=true` the pass still runs end-to-end via a deterministic stub (no key), so you can
+exercise the whole loop offline; a **live** eval needs `ANTHROPIC_API_KEY` + `ANTHROPIC_STUB_MODE=false`.
+Full flow and internals: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) §4.
+
 ## Tests
 
 ```bash
-cd backend && mvn test            # 93 tests — JUnit 5 + MockMvc + SSE integration
-cd app && npm test                # 360 tests — Vitest + jsdom + Testing Library
+cd backend && mvn test            # 121 tests — JUnit 5 + MockMvc + SSE + eval/RAG (JPA on in-memory H2)
+cd app && npm test                # 390 tests — Vitest + jsdom + Testing Library
 cd app && npm run typecheck && npm run build
 cd app && npm run test:e2e        # 10 Playwright web e2e specs (dev server + stub backend)
 cd app && npm run test:e2e:android  # Appium + WebdriverIO (UiAutomator2) on-device journeys

@@ -35,27 +35,46 @@
 - **True prices + quantity reconciliation.** Amazon reads the detail-page buybox price (not the noisy
   listing); per-line quantities are reconciled to each platform's sold pack size (`ceil(total / packSize)`);
   the default per-item pick is the lowest ₹ per kg/L/piece.
-- **Guided-RAG knowledge + durable site memory (two layers).** (1) A curated per-platform policies/hints
-  layer (`knowledge/` + backend `/knowledge`) consumed by agents. (2) An on-device **`SiteMemory`**
-  (`knowledge/siteMemory.ts` + `signature.ts`, localStorage) that learns durable product URLs and element
-  signatures (search box, product card, ADD button — tag/role/name/attrs/bbox) from successful runs and
-  tries them before vision/Claude. Wired into `HyperpureAgent` (`learnFromAdd`/`recallProductUrl`/
-  `matchSignature`). The *continuous* learning pipeline that folds observations back into extraction
-  automatically is still **pending** (notes are advisory today).
+- **Guided-RAG knowledge + durable site memory + a closed self-improvement loop (three layers).**
+  (1) A curated per-platform policies/hints layer (`knowledge/` + backend `/knowledge`, now **DB-backed &
+  versioned**) consumed by agents via `buildTokenMatcher` (guidance, never a gate). (2) An on-device
+  **`SiteMemory`** (`knowledge/siteMemory.ts` + `signature.ts`, localStorage) that learns durable product URLs
+  and element signatures (search box, product card, ADD button — tag/role/name/attrs/bbox) from successful
+  runs and tries them before vision/Claude; wired into `HyperpureAgent`
+  (`learnFromAdd`/`recallProductUrl`/`matchSignature`). (3) A **closed failure→eval→patch loop** (backend
+  `eval/` package): the device files bounded failure reports (`failureReporter`/`failureDigest`, rate-limited,
+  no raw DOM) to `POST /eval/{platform}/failures`; `FailureLogService` dedupes by signature (≥2/24h =
+  repeating); `RagEvalService` asks Claude for the smallest `KnowledgePatch` on a repeat / daily cron /
+  manual run; **additions auto-apply** (only widen recognition) while **removals & policy-flips are gated** as
+  a `PendingPatch` for human promote/reject; every pass is audited in `eval_run`. All of it persists via
+  **Spring Data JPA** (H2 file by default, Postgres-swappable). What remains **pending** is learning from
+  *successes* (mining screenshots/DOM into extraction); today the loop learns from failures + advisory notes.
 - **Candidate / nearby-SKU picker (new).** The vision read returns a **ranked top-N** of candidates per
   platform (`/vision/extract` → `candidates[]`); the device classifies each as `exact`/`nearby`
   (`pricing/matchKind.ts`) and auto-picks the cheapest exact ₹/unit. When the default pick is only a
   `nearby` match, `ComparisonPage` shows an inline "choose a nearby SKU" picker (`select-sku` modify →
   re-optimize) so the user picks without leaving the app.
+- **Hyperpure add-to-cart — root-caused & fixed (navigate-through + inner-span click).** The add silently
+  no-op'd because Hyperpure binds ADD's `onClick` to a `<span>` *inside* the `<button>`; a gesture dispatched
+  on the button bubbled up and never reached the child handler. The actor now dispatches the
+  touch/pointer/mouse/click on the **deepest element at the tap point** (`elementFromPoint`), so React's
+  delegated handler fires; `clickAddWithRetry` re-locates on the fresh DOM (React #418 hydration) and confirms
+  via a cart-count rise (reading the badge *beside* the cart icon) or the ADD→stepper swap. Add-to-cart also
+  prefers the product's **own detail page**: since Hyperpure tiles are not `<a href>` links (slug lives only
+  in React state), the agent **taps the matched tile to navigate** to `/in/<slug>?source=SEARCH_ALL`
+  (`openDetailViaTile`) and adds there, learning/persisting the real URL for next time; it falls back to the
+  listing tile otherwise. Verified live on-device end-to-end.
 - **First-run login gate + opt-in debug tracing** are implemented (see Epics 0/6 and §3.5).
 - **Reliability guardrails (new).** Self-explanatory Claude HTTP errors + a boot-time
   `AnthropicStartupProbe` (catches a retired model id loudly); webview `open()` close-then-reopen (fixes
   stacked webviews + the stranded-settle timeout); outbox drops permanent `4xx` (`BackendHttpError`) instead
   of retry storms; failed adds hand back an honest search URL.
 
-**Pending / not yet built:** continuous RAG learning loop, CP-SAT optimizer (greedy ships), the replayable
-golden-path eval harness / playbook shadow-mode promotion, and re-enabling Amazon once the WAF challenge is
-solved. (The candidate/nearby-product picker, previously pending, is now implemented.)
+**Pending / not yet built:** RAG learning from *successes* (mining screenshots/DOM into extraction — the
+failure→eval→patch loop itself now ships, see above), CP-SAT optimizer (greedy ships), the replayable
+golden-path eval harness / playbook shadow-mode promotion, grounder confidence calibration, and re-enabling
+Amazon once the WAF challenge is solved. (The candidate/nearby-product picker and the guided-RAG
+self-improvement loop, previously pending, are now implemented.)
 
 ---
 
@@ -414,7 +433,7 @@ User ── "order onions + paneer" ──▶ Conversation Layer
 #### 3.6.7 Contract summary
 
 - **Device → AutomationEngine (in-process API):** `open/close`, `search`, `readProduct`, `addToCart`, `getCart`, `checkout`, `placeOrder`, `+ on(event)`.
-- **Device → Backend (HTTP):** `POST /plan`, `POST /next-action`, `POST /verify`, `GET /playbooks/{platform}`, `POST /sessions`, `POST /sessions/{id}/events`, `GET /sessions/{id}`, `GET /sessions/{id}/stream` (SSE).
+- **Device → Backend (HTTP):** `POST /plan`, `POST /next-action`, `POST /verify`, `POST /vision/extract`, `POST /optimize`, `GET /knowledge/{platform}`, `POST /knowledge/{platform}/observations`, `POST /eval/{platform}/failures` (guided-RAG failure report), `GET /playbooks/{platform}`, `POST /sessions`, `POST /sessions/{id}/events`, `GET /sessions/{id}`, `GET /sessions/{id}/stream` (SSE). Operator-facing eval: `POST /eval/{platform}/run`, `GET /eval/{platform}/runs`, `GET /eval/{platform}/pending`, `POST /eval/{platform}/pending/{id}/{promote,reject}`.
 - **Source of truth:** backend event log (durable); device in-memory session (live working copy, continuously checkpointed). UX binds to device state during a run; hydrates from backend on resume.
 
 ---
@@ -457,7 +476,7 @@ Ship greedy in MVP; swap in CP-SAT behind the same `optimize(plan, quotes) → a
 | Optimizer | greedy in MVP; OR-Tools CP-SAT (Java/Python) on the backend | runs server-side |
 | Playbook delivery | registry on backend + cached in-app | fix selectors without app release |
 | Secure store | Capacitor Secure Storage / Android Keystore-backed; encrypted SQLite | sessions, audit |
-| Backend | **Spring Boot (MVP)** — Anthropic proxy, agent brain endpoints, playbook registry, optimizer, eval, telemetry | see §3.5 |
+| Backend | **Spring Boot (MVP)** — Anthropic proxy, agent brain endpoints, playbook registry, optimizer, telemetry, and the **guided-RAG eval loop** (`/eval`) persisted via **Spring Data JPA** (H2 file default, Postgres-swappable) | see §3.5, §0③ |
 | Observability | OpenTelemetry + Langfuse traces of each agent step | reuse existing setup |
 
 ### 5.1 App-shell decision: Capacitor vs native Kotlin
@@ -528,7 +547,7 @@ SKU normalization (mapping "Aashirvaad Atta 10kg" across Amazon and Hyperpure to
 - **Tech:** record deterministic playbooks per site (search box, result card, price node, add-to-cart, cart page, checkout entry, OTP detector, payment-vs-credit detector); Claude-grounded fallback wired in.
 - **Feature:** per-platform health indicator; "playbook stale" self-heal banner.
 - **Acceptance:** end-to-end add-to-cart for 20 common SKUs on each platform, ≥90% success unattended, 100% safe-stop before checkout.
-- **Implemented:** the divergent per-platform logic now lives in dedicated **agents** (§0), not a shared playbook. `HyperpureAgent` searches by navigating **straight to the deterministic results URL** (`/in/search/<slug>?type=SEARCH&query=…`) and adds from the **product detail page** (`/in/<slug>`), clicking ADD and **confirming** via the ADD→stepper swap or a cart-count rise (honest `failed` + product link otherwise). `AmazonAgent` reads the **true detail-page buybox price** (fixing the listing ₹99-vs-real-₹237 bug), extracts the ASIN, and does a native add-to-cart with added/failed confirmation. Curated per-platform **knowledge hints** (`knowledge/`) steer extraction. **Amazon is currently disabled** (AWS-WAF bot-wall — see §0); Hyperpure is the live platform. The Claude-grounded `/next-action` fallback and recorded fixtures exist; a UI health indicator / "playbook stale" banner is pending.
+- **Implemented:** the divergent per-platform logic now lives in dedicated **agents** (§0), not a shared playbook. `HyperpureAgent` searches by navigating **straight to the deterministic results URL** (`/in/search/<slug>?type=SEARCH&query=…`) and adds from the product's **own detail page**, reached either from a learned/captured URL or by **tapping the matched listing tile** to navigate there (`openDetailViaTile` — Hyperpure tiles aren't `<a href>` links), clicking ADD and **confirming** via the ADD→stepper swap or a cart-count rise (honest `failed` + product link otherwise, which also files a failure report to the RAG loop). The critical fix: ADD's `onClick` sits on an inner `<span>` child of the `<button>`, so the click is dispatched on the **deepest element at the tap point** (`elementFromPoint`) and retried on the fresh DOM (React #418 hydration) — this is what turned the silent no-op into a confirmed add (verified live). `AmazonAgent` reads the **true detail-page buybox price** (fixing the listing ₹99-vs-real-₹237 bug), extracts the ASIN, and does a native add-to-cart with added/failed confirmation. Curated per-platform **knowledge hints** (`knowledge/`) steer extraction. **Amazon is currently disabled** (AWS-WAF bot-wall — see §0); Hyperpure is the live platform. The Claude-grounded `/next-action` fallback and recorded fixtures exist; a UI health indicator / "playbook stale" banner is pending.
 
 ### Epic 4 — Comparison & optimizer
 - **Tech:** SKU normalizer (embedding + fuzzy + confirmed cache), `optimize()` greedy, per-order P&L generator, then CP-SAT behind same interface.
@@ -550,7 +569,7 @@ SKU normalization (mapping "Aashirvaad Atta 10kg" across Amazon and Hyperpure to
 
 ### Epic 7 — Observability, eval & self-healing (continuous)
 - **Tech:** golden-path eval harness (replayable site fixtures), step-level traces, playbook drift detection, shadow-mode for new playbooks, grounder confidence calibration, counterfactual logging. (Mirrors the QA framework already designed for the shopping agent.)
-- **Implemented (partial):** opt-in step-level tracing on-device (`debug/automationDebug.ts` overlay + `adb logcat`, including every backend/LLM call), backend telemetry step traces, recorded site fixtures, a guided-knowledge layer that can `recordObservation` against a per-platform corpus, and a durable on-device `SiteMemory` that learns product URLs + element signatures from successful runs. **Reliability guardrails** also shipped here: self-explanatory Claude HTTP-error messages + a boot `AnthropicStartupProbe` (loudly flags a retired/unreachable model id so it surfaces as config, not as in-app "nothing found"); the outbox drops permanent `4xx` (`BackendHttpError.isClientError`) instead of retry storms; and the `bridge.open()` close-then-reopen fix for the webview lifecycle. **Pending:** the replayable golden-path eval harness, playbook drift detection / shadow-mode promotion, grounder confidence calibration, and the continuous RAG learning loop (observations are advisory today, not yet folded back into extraction automatically).
+- **Implemented (partial):** opt-in step-level tracing on-device (`debug/automationDebug.ts` overlay + `adb logcat`, including every backend/LLM call), backend telemetry step traces, recorded site fixtures, a guided-knowledge layer that can `recordObservation` against a per-platform corpus, and a durable on-device `SiteMemory` that learns product URLs + element signatures from successful runs. **A closed guided-RAG self-improvement loop now ships** (backend `eval/` package, DB-backed `knowledge/`): the device reports bounded failures (`failureReporter`/`failureDigest`) to `POST /eval/{platform}/failures`; `FailureLogService` dedupes by signature (≥2 in 24 h = repeating); `EvalTriggerService` fires `RagEvalService` on repeat / a daily cron / a manual `/eval/{platform}/run`; Claude returns the smallest `KnowledgePatch` with **hybrid-by-risk apply** — additions auto-applied, removals/policy-flips gated as a `PendingPatch` for human promote/reject; all persisted via JPA (H2 file, Postgres-swappable) and audited in `eval_run`. Covered by 121 backend tests (`RagEvalServiceTest`, `FailureLogServiceTest`, `EvalTriggerServiceTest`, `EvalControllerTest`, `EvalRepositoriesTest`) with a deterministic `RagEvalResponder` stub for offline/CI. **Reliability guardrails** also shipped here: self-explanatory Claude HTTP-error messages + a boot `AnthropicStartupProbe`; the outbox drops permanent `4xx` (`BackendHttpError.isClientError`) instead of retry storms; and the `bridge.open()` close-then-reopen fix for the webview lifecycle. **Pending:** the replayable golden-path eval harness, playbook drift detection / shadow-mode promotion, grounder confidence calibration, and RAG learning from *successes* (mining screenshots/DOM into extraction — the failure-driven loop is done; success-mining and advisory `recordObservation` notes are not yet folded back into extraction automatically).
 
 ---
 

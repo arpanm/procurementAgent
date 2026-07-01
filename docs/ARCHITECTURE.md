@@ -16,7 +16,7 @@ All money is integer **paise**. Diagrams are [Mermaid](https://mermaid.js.org/) 
 4. [The RAG / knowledge pipeline (per platform)](#4-the-rag--knowledge-pipeline-per-platform)
 5. [Approved‑intent → per‑platform agent execution (plan → JS → WebView → data)](#5-approved-intent--agent-execution)
 6. [Comparison flow (collect quotes → optimize → render)](#6-comparison-flow)
-7. [Add‑to‑cart flow (cached detail page → ADD button → quantity)](#7-add-to-cart-flow)
+7. [Add‑to‑cart flow (navigate‑through to detail page → ADD button → quantity)](#7-add-to-cart-flow)
 8. [The final cart / order‑summary page (product + cart links)](#8-final-cart--order-summary-page)
 9. [Deployment, observability, eval, debugging, improvement loops](#9-deployment-observability-eval-debugging)
 
@@ -43,13 +43,15 @@ flowchart TB
     MEM["SiteMemory + Knowledge<br/>(localStorage RAG)"]
     WV["Platform WebViews<br/>(hyperpure.com / amazon.in)"]
   end
-  subgraph Backend["☁️ Spring Boot backend (stateless reasoning + durable log)"]
+  subgraph Backend["☁️ Spring Boot backend (stateless reasoning + durable log/DB)"]
     LLM["ClaudeService → Anthropic"]
     INT["/intent · /plan · /next-action · /verify · /vision/extract"]
     OPT["/optimize (GreedyOptimizer)"]
-    KN["/knowledge · /playbooks"]
+    KN["/knowledge (DB-backed) · /playbooks"]
+    EVAL["/eval (RagEvalService)<br/>failure→patch, hybrid by risk"]
     SES["/sessions (event store + SSE)"]
     TEL["/telemetry"]
+    DB[("JPA/H2 · Postgres-swappable<br/>failure_log · eval_run · pending_patch · knowledge_doc")]
   end
   UI <--> ORCH
   ORCH --> AG --> ENG --> BR --> WV
@@ -58,15 +60,22 @@ flowchart TB
   ENG -->|/next-action /vision/extract| INT
   ORCH -->|/optimize| OPT
   ORCH -->|/sessions/:id/events| SES
-  AG -->|/knowledge| KN
+  AG -->|GET /knowledge| KN
+  ENG -->|POST /eval/:platform/failures on staged-add failure| EVAL
+  EVAL --> KN
+  KN --- DB
+  EVAL --- DB
   INT --> LLM
+  EVAL --> LLM
 ```
 
 **Core principle (plan §3.6):** the device is **local‑first and event‑sourced**. The WebView + perceive→act
 loop must run on the device (that is where the authenticated session and rendered DOM live), so the device
 owns live state and renders the UX directly from it; every state change is *also* appended to the backend as
 the durable system of record. The backend is a **stateless reasoning provider** (`/plan`, `/next-action`,
-`/verify`, `/vision/extract`, `/optimize`) plus a **durable event log**. No polling on the hot path.
+`/verify`, `/vision/extract`, `/optimize`) plus a **durable event log** and a small **relational store** (JPA)
+for the guided‑RAG self‑improvement loop — the failure log, eval runs, gated patches and versioned knowledge
+docs (§4③). No polling on the hot path.
 
 ---
 
@@ -201,7 +210,7 @@ Injected scripts (`app/src/core/automation/injected/`), each a pure function wra
 | Script | File | Purpose |
 |---|---|---|
 | Perceiver | `domSerializer.ts` | Walk the DOM (incl. open shadow roots / same‑origin iframes), tag interactable/visible nodes `data-pc-idx`, post compact `{idx,tag,role,name,value,bbox,attrs}` |
-| Actor | `actionExecutor.ts` | `click` (resolves to nearest interactive ancestor + full pointer/mouse gesture so React handlers fire), `type` (native value setter + input/change), `select`, `scroll` |
+| Actor | `actionExecutor.ts` | `click` (resolves to the nearest interactive ancestor, then dispatches the full touch→pointer→mouse→click gesture on the **deepest element at the tap point** so a React handler bound to an *inner child* fires — see §7), `type` (native value setter + input/change), `select`, `scroll` |
 | Settle waiter | `settleWaiter.ts` | Resolve on network‑idle + DOM‑quiet debounce (600 ms), hard cap 8 s |
 | Bridge emit | `bridgeEmit.ts` | Emit replies over both postMessage and chunked console |
 
@@ -334,63 +343,135 @@ sequenceDiagram
 
 ## 4. The RAG / knowledge pipeline (per platform)
 
-There are **two** layers, both keyed per platform, that make the agents resilient to site differences and
-learn durable shortcuts. This is partially built — the durable on‑device memory is wired into Hyperpure; the
-continuous, automatic learning loop is **TODO**.
+There are **three** layers, all keyed per platform, that make the agents resilient to site differences and
+let them learn. Two are on‑device (curated hints + durable site memory) and steer *this* run; the third is a
+**closed self‑improvement loop** on the backend that mines device failures into curated‑knowledge patches for
+the *next* run. All three are built and wired for Hyperpure.
 
 ```mermaid
 flowchart TB
-  subgraph Curated["① Guided knowledge (curated, server-seeded)"]
-    SEED["classpath knowledge/{platform}.json<br/>(policies + hints)"] --> KSVC["KnowledgeService<br/>(in-memory, per platform)"]
-    KSVC -->|GET /knowledge/:platform| KSTORE["PlatformKnowledgeStore (device)<br/>+ built-in defaults"]
-    KSTORE --> AG["agents read policies/hints<br/>(e.g. priceFromDetailPage, atcTokens)"]
-    AG -->|POST /knowledge/:platform/observations| KSVC
+  subgraph Device["📱 On-device (steers this run)"]
+    KSTORE["① PlatformKnowledgeStore<br/>(fetch GET /knowledge/:platform<br/>+ built-in defaults)"]
+    AG["HyperpureAgent<br/>matchOpts = atc/added/reject tokens<br/>via buildTokenMatcher"]
+    MEM["② SiteMemory (localStorage)<br/>learned productUrls + ElementSignatures"]
+    KSTORE --> AG
+    MEM -->|recall before acting| AG
+    AG -->|confirmed add → learnFromAdd| MEM
   end
-  subgraph Memory["② Site memory (durable, on-device, learned)"]
-    RUN["successful run<br/>(HyperpureAgent)"] --> LEARN["rememberProductUrl()<br/>rememberLocator(toSignature(el))"]
-    LEARN --> LSTORE["SiteMemory (localStorage)"]
-    LSTORE -->|recall before acting| RECALL["recallProductUrl()<br/>matchSignature(recallLocators())"]
-    RECALL --> AG
+  subgraph Backend["☁️ Backend self-improvement loop (for the next run)"]
+    FAIL["③ failure on stageCart"] -->|POST /eval/:platform/failures| FLOG["FailureLogService<br/>failure_log (signature + 24h dedup)"]
+    FLOG -->|≥2 same signature/24h → REPEATING_FAILURE<br/>or DAILY cron / MANUAL| RAG["RagEvalService<br/>(Claude proposes a KnowledgePatch)"]
+    RAG -->|additions: auto-apply| KDOC["KnowledgeService<br/>knowledge_doc (versioned)"]
+    RAG -->|removals / policyFlips: gate| PEND["PendingPatch<br/>(human promote / reject)"]
+    PEND -->|promote| KDOC
+    KDOC -->|GET /knowledge/:platform| KSTORE
   end
 ```
 
 ### ① Guided knowledge (curated policies + hints)
 
-- **Backend:** `KnowledgeService` (`backend/.../knowledge/KnowledgeService.java`) seeds each platform from
-  `backend/src/main/resources/knowledge/{platform}.json` (`hyperpure.json`, `amazon.json`) at startup —
-  `KnowledgeDoc{policies, hints, notes}`. `addObservation(platform, kind, text)` appends a runtime note to an
-  in‑memory corpus. Endpoints (`KnowledgeController`): `GET /knowledge`, `GET /knowledge/{platform}`,
-  `POST /knowledge/{platform}/observations`.
+- **Backend:** `KnowledgeService` (`backend/.../knowledge/KnowledgeService.java`) is now **DB‑backed**. On
+  first boot it seeds any missing platform from `backend/src/main/resources/knowledge/{platform}.json`
+  (`hyperpure.json`, `amazon.json`) into the `knowledge_doc` table (`KnowledgeDocEntity`, PK = platform,
+  `version`, `doc_json`, `updated_at`); thereafter the live doc is read/written from the DB and its `version`
+  bumps on every change. `KnowledgeDoc = {platform, version, policies, hints, notes}`;
+  `hints = {rejectTokens, processedVariantTokens, atcTokens, addedTokens, searchNotes}`;
+  `policies = {priceFromDetailPage, trustListingPrice}`. Endpoints (`KnowledgeController`): `GET /knowledge`,
+  `GET /knowledge/{platform}`, `POST /knowledge/{platform}/observations` (append a `KnowledgeNote`).
 - **Frontend:** `PlatformKnowledgeStore` (`app/src/core/knowledge/PlatformKnowledgeStore.ts`) fetches the doc
-  (falling back to built‑in `defaults`), exposes `getKnowledge`/`recordObservation`. Agents consume policies
-  like `policies.priceFromDetailPage` (Amazon) and `hints.atcTokens` (add‑to‑cart button labels) via
-  `buildTokenMatcher`.
+  (falling back to built‑in `defaults.ts`, and `normalizeKnowledgeDoc` coerces any partial payload so agents
+  never see `undefined`), exposes `getKnowledge`/`recordObservation`. Agents fold the hint tokens into their
+  matchers via `buildTokenMatcher(base, tokens)` (`app/src/core/knowledge/tokenMatcher.ts`) — it appends the
+  curated tokens to a hard‑coded base regex (escaped, case‑insensitive). **Knowledge only widens recognition;
+  an absent/empty doc is a no‑op**, so a bad or missing hint can never *break* a flow, only fail to help.
 
 ### ② Site memory (durable, learned element signatures + URLs)
 
-- `app/src/core/knowledge/siteMemory.ts` — `SiteMemory` is a `localStorage`‑backed store of:
-  - **product URLs** keyed by canonical item id (`rememberProductUrl`/`recallProductUrl`), and
-  - **element locators** keyed by role (`"detail:addToCart"`, `"listing:productCard"`) as durable
-    `ElementSignature`s with a confidence score (`rememberLocator`/`recallLocators`/`penalizeLocator`).
-- `app/src/core/knowledge/signature.ts` — `toSignature(el)` captures `{tag, role, name tokens, attrs, bbox
-  center}`; `matchSignature(observation, signatures)` re‑finds a learned control by scoring candidates
-  (`scoreSignature`, threshold `MATCH_THRESHOLD`).
-- **Wiring:** `SiteMemory` is created per platform in `ProcureFlow` (`memoryFor`) and shared across the
-  pricing and checkout loops, then handed to `HyperpureAgent` via `AgentRegistry`. On a **confirmed** add the
-  agent calls `learnFromAdd` (remember product URL + ADD/card signatures); on the next run it recalls the URL
-  (skipping search) and tries the learned ADD locator before heuristics, before vision.
+- `app/src/core/knowledge/siteMemory.ts` — `SiteMemory` is a `localStorage`‑backed store (`pc.sitemem.<platform>`) of:
+  - **product URLs** keyed by canonical item id (`rememberProductUrl`/`recallProductUrl`, with a `hits`
+    reinforcement count), and
+  - **element locators** keyed by role (`"search:searchBox"`, `"listing:productCard"`, `"detail:addToCart"`)
+    as durable `ElementSignature`s with a confidence score (`rememberLocator` reinforces on reuse,
+    `penalizeLocator` decays after a miss, max 5 per role).
+- `app/src/core/knowledge/signature.ts` — `toSignature(el)` captures `{tag, role, namePattern, attrType,
+  hasHref, bbox center, confidence, hits}`; `matchSignature(observation, signatures)` re‑finds a learned
+  control by scoring candidates (`scoreSignature`; tag mismatch is a hard 0, name/role/attr/geometry add
+  points, `MATCH_THRESHOLD = 4`). A stale signature simply scores too low — a site redesign can never wedge a
+  flow onto the wrong element.
+- **Wiring:** `SiteMemory` is created per platform in `ProcureFlow` (`memoryFor`, **`undefined` in demo mode**)
+  and handed to `HyperpureAgent` via `AgentRegistry`. On a **confirmed** add the agent calls `learnFromAdd`
+  (remember the product URL + the ADD/card signatures); on the next run `detailUrlFor` recalls the URL
+  (opening the detail page directly, skipping search) and `resolveAddButton` tries the learned ADD locator
+  before heuristics.
 
-### How to (re‑)run the learning for a platform
+### ③ Backend self‑improvement loop (failure → eval → hybrid‑by‑risk patch)
 
-Today, learning happens **inline** during a normal run (Hyperpure writes back on every confirmed add). To
-reset/relearn after a site redesign: clear the platform's `localStorage` namespace (a fresh install or
-`SiteMemory` reset) and run an order — the agent falls back to heuristics/vision, succeeds, and re‑learns the
-new URLs/locators. Curated hints are changed by editing `knowledge/{platform}.json` and restarting the backend.
+This is the closed loop that turns a real on‑device failure into a curated‑knowledge fix — **no app release
+and no human in the steady state for the safe changes.**
 
-> **TODO / status (plan §0, Epic 7):** a *continuous* pipeline that mines screenshots/DOM into the knowledge
-> corpus and folds observations back into extraction automatically is **not** wired — `recordObservation`
-> exists and notes accumulate in memory, but they are advisory. A standalone "learn this platform's
-> flows/pages" batch job is a designed‑for extension, not built. Amazon vision learning is dormant while
+- **Report (device):** when `CheckoutDriver.stageCart` gets a `{status:"failed"}` from an agent, it calls
+  `reportStagingFailure` → `BackendFailureReporter.report` (`app/src/core/knowledge/failureReporter.ts`),
+  which `POST`s `/eval/{platform}/failures`. The payload is
+  `{flow, signature (=skuId), reason, url, domDigest, screenshotBase64?, itemName, at}`. The **DOM digest** is
+  a bounded, human‑readable summary — `digestObservation` (`failureDigest.ts`) emits at most 40 labelled
+  elements, names truncated to 48 chars — **never the raw DOM** (token cost + session text). The reporter is
+  **rate‑limited on‑device** to ≤1 report per `platform|flow|signature` per hour (persisted in `localStorage`
+  `pc.failcooldown`) and is **disabled in demo mode**. It is best‑effort and never throws.
+- **Store + dedup (backend):** `FailureLogService` persists each report to the `failure_log` table
+  (`FailureLogEntity`), stamping server time. A **signature** groups “the same failure” (explicit signature →
+  `skuId` → a slug of `itemName+reason`). A failure is **repeating** when the same `(platform, signature)` has
+  occurred **≥2 times in a 24 h window**.
+- **Trigger (backend):** `EvalTriggerService` runs `RagEvalService.evaluate` on one of three triggers
+  (`EvalTrigger`): **`REPEATING_FAILURE`** (fired by a repeating report, but at most once/hour/platform so a
+  storm can't stampede), **`DAILY`** (`@Scheduled` cron `0 0 3 * * *`, sweeps all platforms — needs
+  `@EnableScheduling`, present on `ProcureCopilotApplication`), and **`MANUAL`** (`POST /eval/{platform}/run`).
+- **Evaluate (backend, Claude):** `RagEvalService` pulls up to 25 **unconsumed** failures, sends the current
+  `KnowledgeDoc` + the failure batch (first screenshot attached for vision) to Claude, and asks for the
+  *smallest* `KnowledgePatch` = `{summary, additions, removals, policyFlips}`. The batch is marked
+  **consumed** so it's never re‑processed. Offline/CI uses a deterministic `RagEvalResponder` stub (no key).
+- **Apply — hybrid by risk:**
+  - **`additions`** (new `atcTokens`/`addedTokens`/`rejectTokens`/`searchNotes`) only *widen* recognition, so
+    they are **auto‑applied**: merged into the doc (case‑insensitive, skip dupes), `version` bumped, saved.
+  - **`removals`** and **`policyFlips`** (`priceFromDetailPage`/`trustListingPrice`) can *break* a working
+    flow, so they are **gated**: written as a `PendingPatchEntity` (`pending_patch`, status `PENDING`) for a
+    human to `promote` (apply + bump version) or `reject`. Every run is recorded immutably in `eval_run`
+    (`EvalRunEntity`: trigger, status `SUCCESS|NOOP|ERROR`, from/to version, summary, applied/pending JSON).
+- **Consume (device):** the next run's `PlatformKnowledgeStore.getKnowledge` fetches the updated doc, and the
+  new `atcTokens`/`addedTokens` flow straight into the agent's `buildTokenMatcher` — closing the loop.
+
+### How to run / operate the RAG loops
+
+**On‑device site memory (②)** learns **inline** on every confirmed add — nothing to run. To force a relearn
+after a redesign, clear the platform's `localStorage` (`pc.sitemem.<platform>`) or reinstall, then run an
+order: the agent falls back to heuristics/vision, succeeds, and re‑learns the URL/locators.
+
+**Backend eval loop (③)** — the failure log fills automatically as the device hits `stageCart` failures. To
+drive/inspect it (base `http://localhost:8080`, `{platform}` = `hyperpure`):
+
+```bash
+# Trigger an eval pass now (instead of waiting for a repeat or the 3 AM cron):
+curl -X POST http://localhost:8080/eval/hyperpure/run
+# Recent eval runs (newest first) — see what was applied vs gated:
+curl http://localhost:8080/eval/hyperpure/runs
+# Gated (risky) patches awaiting a human verdict:
+curl http://localhost:8080/eval/hyperpure/pending
+# Promote or reject a gated patch by id:
+curl -X POST http://localhost:8080/eval/hyperpure/pending/42/promote
+curl -X POST http://localhost:8080/eval/hyperpure/pending/42/reject
+# See the current curated doc the device will fetch:
+curl http://localhost:8080/knowledge/hyperpure
+```
+
+The failure log / eval runs / patches / knowledge docs persist in the backend DB (H2 file by default; see
+§9). With `ANTHROPIC_STUB_MODE=true` the eval pass still runs end‑to‑end using the deterministic
+`RagEvalResponder`, so you can exercise the whole loop offline. For a **live** eval you need
+`ANTHROPIC_API_KEY` + `ANTHROPIC_STUB_MODE=false`.
+
+> **Status:** the guided‑RAG closed loop (report → dedup → eval → hybrid apply → serve) **is built and
+> tested** (backend `eval/` package + `knowledge/` persistence; device `failureReporter`/`failureDigest`).
+> What remains **TODO** (plan §Epic 7): a *continuous* pipeline that also mines successful screenshots/DOM
+> into extraction (today the loop learns from *failures* + advisory `recordObservation` notes), playbook
+> drift detection / shadow‑mode promotion, and grounder confidence calibration. Amazon eval is dormant while
 > Amazon is disabled.
 
 ---
@@ -569,44 +650,68 @@ the reducer applies by replacing the chosen quote + pinning the platform, then r
 
 On approval, `ProcureFlow.runCheckout` builds a `productUrls` map (`canonicalItemId → quote.productUrl`) and
 runs `CheckoutDriver.stageCart` per platform — a **best‑effort cart hand‑off** (no auto‑place). Each line is
-added by the platform agent.
+added by the platform agent, which prefers the product's **own detail page** (one unambiguous ADD) over the
+crowded search listing.
 
 ```mermaid
 flowchart TB
   ST["stageCart(allocation)"] --> L{for each line}
-  L --> DU["detailUrlFor(line)<br/>① learned URL (SiteMemory)<br/>② captured productUrl<br/>③ slug-derived URL"]
-  DU --> OP["open product page"]
-  OP --> LC{locate product card?}
-  LC -->|no & item known| SS["search + settleListingForAdd<br/>(scroll virtualized grid)"]
-  SS --> LC
-  LC -->|yes| FB["find ADD button:<br/>① near card<br/>② learned signature<br/>③ heuristic ADD"]
-  FB --> CK["robust click ADD"]
-  CK --> CF{addLooksConfirmed?<br/>cart-count rise / stepper swap}
-  CF -->|yes| QTY["incrementTo(qty)<br/>click + up to MAX_QTY_CLICKS"]
-  QTY --> LRN["learnFromAdd()<br/>remember URL + signatures"]
-  LRN --> OK["status: added (productUrl=handoffUrl)"]
-  CF -->|no| FAIL["status: failed + honest productUrl<br/>(search URL, never a bouncing slug)"]
+  L --> DU["detailUrlFor(line)<br/>① learned URL (SiteMemory)<br/>② captured quote.productUrl"]
+  DU -->|have URL| OP["open detail page"]
+  DU -->|no URL| SR["search + settleListingForAdd<br/>(scroll virtualized grid) → locate tile"]
+  SR --> NT["openDetailViaTile:<br/>tap the tile to navigate to /in/&lt;slug&gt;<br/>(tiles are NOT &lt;a href&gt;)"]
+  NT -->|landed on product page| OP
+  NT -->|didn't navigate| LIST["fall back: add from listing tile"]
+  OP --> RB["resolveAddButton:<br/>① near card ② learned signature ③ heuristic ADD"]
+  LIST --> RB
+  RB --> CK["clickAddWithRetry:<br/>click deepest element at tap point;<br/>re-observe + re-locate on stale DOM (≤3×)"]
+  CK --> CF{addLooksConfirmed?<br/>cart-count rise/appear · stepper swap}
+  CF -->|yes| QTY["incrementTo(qty) via '+' stepper<br/>(≤ MAX_QTY_CLICKS)"]
+  QTY --> LRN["learnFromAdd()<br/>persist real URL + signatures"]
+  LRN --> OK["status: added (productUrl = real detail URL)"]
+  CF -->|no| RPT["status: failed + honest productUrl → §4③ failure report"]
 ```
 
-### How the product detail page is cached
+### How the detail page is reached & cached (navigate‑through)
 
-The detail URL is resolved in priority order by `HyperpureAgent.detailUrlFor`:
-1. **Learned URL** from `SiteMemory.recallProductUrl(canonicalId)` (validated by `isHyperpureProductUrl`),
-2. the **captured** `quote.productUrl` from the read phase (carried on the `Quote`),
-3. the **slug‑derived** `hyperpureProductUrl(skuId)` fallback.
+`HyperpureAgent.detailUrlFor` resolves a **known** detail URL in priority order: (1) the **learned URL** from
+`SiteMemory.recallProductUrl(canonicalId)`, then (2) the **captured** `quote.productUrl`. It deliberately
+**does not guess a slug** — a guessed `/in/<skuId>` used to 404 / bounce to an "explore more" page whose ADD
+silently no‑op'd.
 
-On a confirmed add, `learnFromAdd` writes the product URL + the ADD/card `ElementSignature`s back to
-`SiteMemory`, so the next order for that item opens the known URL directly (no search).
+When there's no known URL, the agent can't scrape one from the listing either: **Hyperpure search tiles are
+not `<a href>` links** — they route via JS and the real slug lives only in React state (there is no
+`data-slug` / slug‑in‑image to serialize). So `openDetailViaTile` **taps the matched tile** to navigate to the
+product's own page (`/in/<slug>?source=SEARCH_ALL`), reads the resulting URL, and adds there. If the tap
+doesn't land on a product page it falls back to adding straight from the listing tile (which also works). On a
+confirmed add, `learnFromAdd` persists the **real** URL + the ADD/card `ElementSignature`s, so the next order
+opens the detail page directly (when `SiteMemory` is wired — i.e. non‑demo).
 
-### How the ADD button is identified & clicked
+### How the ADD button is identified & clicked (the root‑cause fix)
 
-`addToCart` (`app/src/core/agents/hyperpure/HyperpureAgent.ts`) resolves the ADD control in order:
-`findAddButtonForCard` (nearest by Manhattan distance to the located card — avoids adding a neighbor SKU) →
-learned signature (`matchSignature(obs, recallLocators("detail:addToCart"))`) → heuristic
-`findHyperpureAddButtons[0]`. The click is the **robust click** (`injected/actionExecutor.ts`): it resolves
-to the nearest interactive ancestor and dispatches a full pointer/mouse gesture so React's handlers fire
-(a bare `el.click()` on a wrapper `div` did nothing). Success is confirmed by `addLooksConfirmed` (cart‑count
-increase **or** an `−  qty  +` stepper appearing near the old ADD).
+`resolveAddButton` picks the control in order: `findAddButtonForCard` (nearest by Manhattan distance to the
+located card — avoids adding a neighbour SKU) → learned signature
+(`matchSignature(obs, recallLocators("detail:addToCart"))`) → heuristic `findHyperpureAddButtons[0]`, with
+`atcTokens` from curated knowledge widening the label match.
+
+The click is the **robust click** in `injected/actionExecutor.ts`. Hyperpure binds ADD's `onClick` to an
+**inner `<span>` that is a child of the `<button>`**, not the button itself. React's delegated event system
+only fires that handler when the event target is the span or a descendant — a gesture dispatched on the
+ancestor button bubbles *up* and never reaches it, which was the silent "ADD clicked, cart unchanged,
+DOM byte‑identical" no‑op on **both** the listing and the detail page. The fix: after resolving the
+interactive ancestor (for scroll/focus), dispatch the full touch→pointer→mouse→click gesture on the
+**deepest element at the tap point** (`document.elementFromPoint`, with a deepest‑leaf fallback for
+jsdom) — exactly what a real finger hits — so the event bubbles *up through* the handler span. Verified live:
+a plain `button.click()` does nothing, but dispatching on the inner span swaps ADD → a quantity stepper and
+the header cart badge goes 0→1.
+
+`clickAddWithRetry` then confirms with `addLooksConfirmed` and **retries up to 3×**, re‑observing and
+re‑locating the ADD on the fresh DOM each time (Hyperpure's React‑hydration re‑render, error #418, can wipe
+the `data-pc-idx` handle a click was aimed at). Confirmation (`selectors.ts` `addLooksConfirmed`) accepts a
+**cart‑count rise or appearance** — `readCartCount` reads the integer badge that sits *beside* the cart icon
+(Hyperpure renders the count as a **sibling** of `<img alt="Cart icon">`, not inside a cart‑labelled node) —
+**or** an `−  qty  +` stepper appearing where ADD was. A failed confirmation returns `status:"failed"` with an
+honest product/search URL (never a bouncing slug) and feeds the §4③ failure loop.
 
 ### How quantity is handled
 
@@ -672,6 +777,10 @@ flowchart LR
 
 - Backend: `backend/Dockerfile` → any container host; key as a secret; readiness on `/actuator/health`. The
   `AnthropicStartupProbe` logs `model reachable ✓` (or a loud banner) at boot.
+- **Persistence:** Spring Data JPA. Default is an **H2 file DB** at `jdbc:h2:file:./data/procure;AUTO_SERVER=TRUE`
+  (`SPRING_DATASOURCE_URL`), `ddl-auto: update`, so the failure log / eval runs / gated patches / knowledge
+  docs survive restarts. Swap to **Postgres** for production by pointing `SPRING_DATASOURCE_URL` at it (the
+  `postgresql` driver is already on the classpath). Sessions/telemetry remain in‑memory today.
 - App: production points `VITE_BACKEND_URL` at an HTTPS backend; dev uses `adb reverse`/`10.0.2.2`. Demo APK
   needs no live sites or backend key (stub mode).
 
@@ -683,6 +792,7 @@ flowchart LR
 | Backend step traces | `backend/.../telemetry/` (`/telemetry/recent`) | Per‑step `TraceSpan`s |
 | Audit (tamper‑evident) | `app/src/core/audit/AuditLog.ts` + `/telemetry/audit` | Hash‑chained on‑device audit of every checkout step |
 | Durable session log | `backend/.../session/SessionStore.java` (`/sessions/{id}`, `/sessions/{id}/stream` SSE) | Append‑only event log, idempotent by `clientEventId`, SSE for a live second screen |
+| Failure log + eval history | `backend/.../eval/` (`/eval/{platform}/failures`, `/runs`, `/pending`) | JPA tables `failure_log` / `eval_run` / `pending_patch`; every eval pass and gated patch is auditable (§4③) |
 
 ### Debugging guardrails (added after real‑run regressions)
 
@@ -703,10 +813,12 @@ flowchart LR
 | On‑device e2e (Appium + WebdriverIO, demo APK) | ✅ | `app/e2e-android/` (full‑journey, split, modify, OTP, payment, cancel, chat…) |
 | Recorded site fixtures | ✅ (partial) | `app/src/core/adapters/recordedFixtures/` |
 | Step‑level traces + audit | ✅ | overlay + backend telemetry + hash‑chained audit |
+| **Guided‑RAG self‑improvement loop** (failure → eval → hybrid‑by‑risk patch → serve) | ✅ | backend `eval/` + DB‑backed `knowledge/`; device `failureReporter`/`failureDigest` (§4③); 121 backend tests incl. `RagEvalServiceTest`/`EvalTriggerServiceTest`/`EvalControllerTest` |
+| Durable persistence (failure log / eval runs / patches / knowledge docs) | ✅ | JPA + H2 file (Postgres‑swappable) |
+| Continuous RAG learning from **successes** (mine screenshots/DOM into extraction) | ⛔ **TODO** | loop learns from failures + advisory notes today (§4) |
 | Golden‑path replayable eval harness | ⛔ **TODO** | plan §Epic 7 |
 | Playbook drift detection / shadow‑mode promotion | ⛔ **TODO** | plan §3.5.7 |
 | Grounder confidence calibration | ⛔ **TODO** | |
-| Continuous RAG learning loop | ⛔ **TODO** | observations advisory today (§4) |
 | CP‑SAT optimizer | ⛔ **TODO** | greedy ships; same `optimize()` seam |
 | Re‑enable Amazon (solve AWS‑WAF) | ⛔ **TODO** | agent retained; flip `ACTIVE_PLATFORMS` |
 
@@ -722,7 +834,10 @@ flowchart LR
 | `POST /vision/extract` | `VisionExtractController` | Ranked product candidates from a screenshot |
 | `POST /optimize` | `OptimizerController` → `GreedyOptimizer` | Explainable cart‑split allocation |
 | `POST /verify` | `VerifyController` | Cart‑vs‑plan assertion (Verifier) |
-| `GET /knowledge` · `GET /knowledge/{platform}` · `POST /knowledge/{platform}/observations` | `KnowledgeController` | Guided‑RAG policies/hints + append observation |
+| `GET /knowledge` · `GET /knowledge/{platform}` · `POST /knowledge/{platform}/observations` | `KnowledgeController` → `KnowledgeService` (DB‑backed) | Guided‑RAG policies/hints (versioned `knowledge_doc`) + append observation |
+| `POST /eval/{platform}/failures` | `EvalController` → `EvalTriggerService` | Ingest a device failure report (may trigger a `REPEATING_FAILURE` eval) |
+| `POST /eval/{platform}/run` · `GET /eval/{platform}/runs` | `EvalController` → `RagEvalService` | Manually run an eval pass · list recent eval runs |
+| `GET /eval/{platform}/pending` · `POST /eval/{platform}/pending/{id}/{promote\|reject}` | `EvalController` | List gated (risky) patches · promote/reject one |
 | `GET /playbooks/{platform}` · `GET /playbooks/{platform}/{flow}` · `POST /playbooks/{platform}` | `PlaybookController` | Playbook registry (remote selector fixes) |
 | `POST /sessions` · `POST /sessions/{id}/events` · `GET /sessions/{id}` · `GET /sessions/{id}/stream` | `SessionController` → `SessionStore` | Durable event log + SSE |
 | `GET /telemetry/recent` · `GET /telemetry/audit` | `TelemetryController` | Step traces + audit events |
