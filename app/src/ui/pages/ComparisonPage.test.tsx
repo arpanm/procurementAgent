@@ -213,20 +213,64 @@ describe("ComparisonPage", () => {
       matchKind: "nearby",
       readAt: "2026-01-01T00:00:00.000Z",
     };
-    const alt: Quote = { ...chosen, skuId: "amul-1kg", title: "Amul Paneer 1 Kg", pricePaise: 40000 };
+    // Same product, different SIZE — an approximate (nearby) match, NOT ambiguous.
+    const alt: Quote = {
+      ...chosen,
+      skuId: "mm-500g",
+      title: "Milky Mist Paneer 500 g",
+      packSize: "500 g",
+      pricePaise: 40000,
+    };
     orch.recordQuote(chosen);
     orch.recordCandidates("potato", [chosen, alt]);
     await orch.optimize();
 
     render(<ComparisonPage orchestrator={orch} />);
 
-    // The approximate-match toggle is shown; expand it to reveal candidate SKUs.
+    // The subtle approximate-match toggle is shown (collapsed); expand it to reveal candidate SKUs.
     const toggle = screen.getByTestId("picker-toggle-potato");
     expect(toggle).toHaveTextContent("Approximate match");
     fireEvent.click(toggle);
 
     // Selecting the alternate SKU dispatches a select-sku modify (re-optimizes).
-    fireEvent.click(screen.getByTestId("candidate-potato-amul-1kg"));
+    fireEvent.click(screen.getByTestId("candidate-potato-mm-500g"));
+    await waitFor(() => expect(optimize).toHaveBeenCalledTimes(2));
+  });
+
+  it("prominently asks the user to pick when a query is AMBIGUOUS (different products), open by default", async () => {
+    const optimize = vi
+      .fn()
+      .mockResolvedValueOnce(allocation(31400))
+      .mockResolvedValueOnce(allocation(28000));
+    const orch = new Orchestrator(makeBackend(optimize as unknown as BackendClient["optimize"]), {
+      sessionId: "s1",
+      retryDelayMs: 0,
+    });
+    await orch.start(REQUEST);
+    // "chicken" matched several DIFFERENT products — the app must ask which one.
+    const chosen: Quote = {
+      platform: "hyperpure",
+      skuId: "nugget-1kg",
+      canonicalItemId: "potato",
+      title: "ITC - Crunchy Chicken Nugget, 1 Kg",
+      pricePaise: 31400,
+      packSize: "1 Kg",
+      inStock: true,
+      matchKind: "exact",
+      readAt: "2026-01-01T00:00:00.000Z",
+    };
+    const alt: Quote = { ...chosen, skuId: "curry-1kg", title: "Chicken Curry Cut 1 Kg", pricePaise: 28000 };
+    orch.recordQuote(chosen);
+    orch.recordCandidates("potato", [chosen, alt]);
+    await orch.optimize();
+
+    render(<ComparisonPage orchestrator={orch} />);
+
+    // Ambiguous → prominent header, and it's OPEN by default (no toggle click needed).
+    const picker = screen.getByTestId("picker-potato");
+    expect(picker).toHaveAttribute("data-ambiguous", "true");
+    expect(screen.getByTestId("picker-toggle-potato")).toHaveTextContent("Multiple products match");
+    fireEvent.click(screen.getByTestId("candidate-potato-curry-1kg"));
     await waitFor(() => expect(optimize).toHaveBeenCalledTimes(2));
   });
 

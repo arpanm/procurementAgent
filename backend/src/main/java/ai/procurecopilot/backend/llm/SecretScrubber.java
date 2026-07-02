@@ -38,6 +38,13 @@ public class SecretScrubber {
     private static final Pattern OTP_FIELD =
             Pattern.compile("(?i)(one[\\s-]?time[\\s-]?code|otp|verification code|pin)\\D{0,12}\\d{3,8}");
 
+    // Unlabeled 13-19 digit payment card / long account numbers (optionally grouped with single spaces
+    // or dashes, e.g. "4111 1111 1111 1111"). Bounded so it can't fire on the 4-8 digit prices/bbox
+    // coordinates in a DOM observation. This is the one residual an attacker-supplied page DOM could
+    // otherwise leak into a grounding call.
+    private static final Pattern CARD_NUMBER =
+            Pattern.compile("(?<![\\d])(?:\\d[ -]?){12,18}\\d(?![\\d])");
+
     /** Returns a copy of {@code input} with secrets replaced by {@code [REDACTED]} markers. */
     public String scrub(String input) {
         if (input == null || input.isEmpty()) {
@@ -49,6 +56,7 @@ public class SecretScrubber {
         out = TOKEN.matcher(out).replaceAll("[REDACTED_TOKEN]");
         out = EMAIL.matcher(out).replaceAll("[REDACTED_EMAIL]");
         out = PHONE.matcher(out).replaceAll("[REDACTED_PHONE]");
+        out = CARD_NUMBER.matcher(out).replaceAll("[REDACTED_CARD]");
         return out;
     }
 
@@ -60,6 +68,7 @@ public class SecretScrubber {
         return EMAIL.matcher(input).find()
                 || PHONE.matcher(input).find()
                 || API_KEY.matcher(input).find()
-                || TOKEN.matcher(input).find();
+                || TOKEN.matcher(input).find()
+                || CARD_NUMBER.matcher(input).find();
     }
 }

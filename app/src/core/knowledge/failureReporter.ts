@@ -84,6 +84,7 @@ export class BackendFailureReporter implements FailureReporter {
 
     // Reserve the slot BEFORE awaiting the post, so two near-simultaneous failures of the same kind
     // can't both slip through while the first request is in flight.
+    const previous = this.lastSent.get(key);
     this.lastSent.set(key, now);
     this.persist();
 
@@ -93,7 +94,15 @@ export class BackendFailureReporter implements FailureReporter {
         at: new Date(now).toISOString(),
       });
     } catch {
-      // Best-effort: a lost report is fine; the cooldown stays set so we don't immediately retry-spam.
+      // The post FAILED (transient backend blip). Roll the cooldown back to its prior value so a genuine
+      // recurring failure isn't silently suppressed for the full hour on the strength of a lost request —
+      // the next occurrence gets another attempt. (The in-flight double is still prevented above.)
+      if (previous == null) {
+        this.lastSent.delete(key);
+      } else {
+        this.lastSent.set(key, previous);
+      }
+      this.persist();
     }
   }
 

@@ -82,8 +82,15 @@ public class RagEvalService {
         this.pending = pending;
     }
 
-    /** Run one eval pass for a platform and return the persisted audit record. */
-    @Transactional
+    /**
+     * Run one eval pass for a platform and return the persisted audit record.
+     *
+     * <p>Deliberately NOT {@code @Transactional}: the ~60s Claude call must not run inside a DB
+     * transaction (it would pin a pooled connection for the whole round-trip → pool starvation, H5).
+     * Each mutating step below runs in its own short transaction via {@link FailureLogService} /
+     * {@link KnowledgeService} / the repositories. The run row is persisted as a {@code RUNNING} claim
+     * BEFORE the model call (M5) so a concurrent repeating-failure trigger sees it and doesn't stampede.
+     */
     public EvalRunEntity evaluate(PlatformId platform, EvalTrigger trigger, Instant now) {
         EvalRunEntity run = new EvalRunEntity(platform.wire(), trigger, now);
         List<FailureLogEntity> batch = failures.unconsumed(platform);
@@ -101,6 +108,11 @@ public class RagEvalService {
 
         KnowledgeDoc doc = knowledge.get(platform);
         run.setVersions(doc.version(), doc.version());
+
+        // M5: persist the claim BEFORE the slow model call, so a concurrent repeating-failure trigger's
+        // cooldown check finds this run and skips (rather than both firing during the 60s window).
+        run.setStatus(EvalStatus.RUNNING);
+        run = runs.save(run);
 
         KnowledgePatch patch;
         try {

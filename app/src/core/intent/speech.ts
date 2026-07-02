@@ -19,6 +19,12 @@ export type SpeechResultListener = (result: SpeechResult) => void;
 export type SpeechErrorListener = (error: Error) => void;
 
 export interface SpeechInput {
+  /**
+   * True when real speech recognition is actually available on this device. The UI hides the mic when
+   * this is false (e.g. the {@link NoopSpeechInput} stub) so the user never sees a "Listening…" state
+   * that can never produce a transcript.
+   */
+  readonly isAvailable: boolean;
   /** True while a recognition session is active (mic is "hot"). */
   readonly isListening: boolean;
   /**
@@ -42,6 +48,11 @@ export class NoopSpeechInput implements SpeechInput {
   private listening = false;
   private readonly resultListeners = new Set<SpeechResultListener>();
   private readonly errorListeners = new Set<SpeechErrorListener>();
+
+  /** The stub cannot actually recognise speech, so the mic is hidden wherever this is used. */
+  get isAvailable(): boolean {
+    return false;
+  }
 
   get isListening(): boolean {
     return this.listening;

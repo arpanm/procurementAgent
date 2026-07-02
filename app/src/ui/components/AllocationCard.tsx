@@ -9,6 +9,7 @@ import { IonText } from "@ionic/react";
 import type { ReactNode } from "react";
 import type { Allocation, AllocationLine } from "../../core/domain/types";
 import { formatRupees } from "../../core/domain/types";
+import { platformLabel } from "../../core/config";
 
 export interface AllocationCardProps {
   readonly allocation: Allocation;
@@ -33,7 +34,7 @@ export function AllocationCard({
           <div className="pc-card__head">
             <span className={`pc-platform pc-platform--${platform.platform}`}>
               <span className="pc-platform__dot" />
-              <span className="pc-platform__name">{platform.platform}</span>
+              <span className="pc-platform__name">{platformLabel(platform.platform)}</span>
             </span>
             <span style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
               {platform.payableOnCredit ? (

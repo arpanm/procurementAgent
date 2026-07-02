@@ -150,9 +150,12 @@ function singlePlatformBaseline(
     let canFulfilAll = true;
     for (const item of items) {
       const id = itemCanonicalId(item);
-      const quote =
-        quotes.find((q) => q.platform === platform && q.canonicalItemId === id && q.inStock) ??
-        quotes.find((q) => q.platform === platform && q.canonicalItemId === id);
+      // A single-platform baseline must be genuinely orderable there, so require an IN-STOCK quote.
+      // Falling back to an out-of-stock quote would inflate "you can buy it all here for ₹X" with a
+      // price you can't actually transact, distorting the saving figure at the approval gate.
+      const quote = quotes.find(
+        (q) => q.platform === platform && q.canonicalItemId === id && q.inStock,
+      );
       if (!quote) {
         canFulfilAll = false;
         break;

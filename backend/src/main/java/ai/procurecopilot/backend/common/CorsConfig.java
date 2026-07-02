@@ -1,6 +1,9 @@
 package ai.procurecopilot.backend.common;
 
+import jakarta.annotation.PostConstruct;
+import java.util.Arrays;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -20,10 +23,34 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class CorsConfig implements WebMvcConfigurer {
 
     private final String[] allowedOriginPatterns;
+    private final Environment env;
 
     public CorsConfig(
-            @Value("${procure.cors.allowed-origins:*}") String allowedOrigins) {
+            @Value("${procure.cors.allowed-origins:*}") String allowedOrigins,
+            Environment env) {
         this.allowedOriginPatterns = allowedOrigins.split("\\s*,\\s*");
+        this.env = env;
+    }
+
+    /**
+     * Fail closed in production: a wildcard (or blank) CORS origin under the {@code prod} profile means
+     * any website in a user's browser could script the API. Refuse to start so a mis-configured deploy is
+     * caught at boot instead of shipping an open cross-origin surface.
+     */
+    @PostConstruct
+    void rejectWildcardInProduction() {
+        boolean prod = Arrays.asList(env.getActiveProfiles()).contains("prod");
+        if (!prod) {
+            return;
+        }
+        for (String pattern : allowedOriginPatterns) {
+            if (pattern == null || pattern.isBlank() || pattern.trim().equals("*")) {
+                throw new IllegalStateException(
+                        "procure.cors.allowed-origins must be an explicit list under the 'prod' profile "
+                        + "(never '*' or blank). Set PROCURE_CORS_ALLOWED_ORIGINS to your app origins, "
+                        + "e.g. 'capacitor://localhost,https://localhost'.");
+            }
+        }
     }
 
     @Override

@@ -30,10 +30,12 @@ import type {
   RequestedItem,
 } from "../../core/domain/types";
 import { formatRupees, SUPPORTED_PLATFORMS } from "../../core/domain/types";
+import { isTtsAvailable } from "../../core/intent/tts";
 import type { ReadableStore } from "../../core/orchestrator/store";
 import type { ModifyChange, SessionState } from "../../core/orchestrator/session";
 import { explainAllocation } from "../../core/optimizer/OptimizerClient";
 import { parsePackSize, perUnitPrice, comparableUnitPaise } from "../../core/pricing/packPricing";
+import { isAmbiguousItem } from "../../core/pricing/ambiguity";
 import { packsNeeded } from "../../core/pricing/quantityReconcile";
 import { AllocationCard } from "../components/AllocationCard";
 import { BrandHeader } from "../components/BrandHeader";
@@ -82,6 +84,9 @@ export function ComparisonPage({
   allocation: fallbackAllocation,
   speak = noopSpeak,
 }: ComparisonPageProps): JSX.Element {
+  // Show "read back" only when speech is actually possible: a real injected speak fn (production/tests)
+  // or a TTS-capable runtime — never a dead control that does nothing.
+  const ttsAvailable = speak !== noopSpeak || isTtsAvailable();
   const subscribe = useCallback(
     (cb: () => void) => orchestrator.subscribe(cb),
     [orchestrator],
@@ -92,6 +97,8 @@ export function ComparisonPage({
   const [editing, setEditing] = useState(false);
   /** Which item's "choose a nearby SKU" picker is currently expanded (only one open at a time). */
   const [expandedPicker, setExpandedPicker] = useState<string | null>(null);
+  /** Ambiguous-item pickers that the user has explicitly collapsed (they open by default). */
+  const [collapsedAmbig, setCollapsedAmbig] = useState<ReadonlySet<string>>(new Set());
 
   const allocation = state.allocation ?? fallbackAllocation ?? null;
   const explanation = useMemo(
@@ -230,46 +237,72 @@ export function ComparisonPage({
   );
 
   /**
-   * The in-app "choose a nearby SKU" picker. Shown only when the item's DEFAULT pick is a NEARBY
-   * (approximate) match and there are ranked alternatives to offer — exactly the user's rule: auto-pick
-   * an exact brand+size match, only ask when there's none. Reuses the same choice-button styling as the
-   * per-platform chooser; selecting a candidate dispatches a `select-sku` modify (re-optimizes + pins).
+   * The in-app product picker. Two triggers:
+   *  - AMBIGUOUS: the sourced candidates span more than one distinct PRODUCT (e.g. "chicken" → nugget /
+   *    curry cut / whole). We must not silently auto-pick, so this is surfaced PROMINENTLY and OPEN by
+   *    default, asking the user to choose the right product.
+   *  - NEARBY: the default pick is only an approximate (nearby) match — a subtler, collapsed "choose a
+   *    different option" affordance.
+   * Selecting a candidate dispatches a `select-sku` modify (re-optimizes + pins). No trigger → null.
    */
-  const renderNearbyPicker = useCallback(
+  const renderProductPicker = useCallback(
     (item: RequestedItem, canonicalItemId: string): JSX.Element | null => {
       const candidates = state.candidatesByItem[canonicalItemId] ?? [];
       const selectedQuote = selectedQuoteFor(canonicalItemId);
-      // Only surface the picker for an approximate default with real alternatives to choose between.
-      if (selectedQuote?.matchKind !== "nearby" || candidates.length < 2) {
+      const ambiguous = isAmbiguousItem(candidates);
+      const nearby = selectedQuote?.matchKind === "nearby" && candidates.length >= 2;
+      if (!ambiguous && !nearby) {
         return null;
       }
-      const expanded = expandedPicker === canonicalItemId;
+      // Ambiguous pickers open by default (until the user collapses); nearby ones stay collapsed.
+      const expanded = ambiguous
+        ? !collapsedAmbig.has(canonicalItemId)
+        : expandedPicker === canonicalItemId;
+      const toggle = (): void => {
+        if (decided) return;
+        if (ambiguous) {
+          setCollapsedAmbig((prev) => {
+            const next = new Set(prev);
+            if (next.has(canonicalItemId)) next.delete(canonicalItemId);
+            else next.add(canonicalItemId);
+            return next;
+          });
+        } else {
+          setExpandedPicker(expanded ? null : canonicalItemId);
+        }
+      };
+      const headerText = ambiguous
+        ? `Multiple products match “${item.name}” — pick the right one (${candidates.length})`
+        : `Approximate match — choose a different option (${candidates.length})`;
       return (
         <div
           data-testid={`picker-${canonicalItemId}`}
-          style={{ marginTop: "0.5rem", borderTop: "1px dashed rgba(var(--ion-text-color-rgb,0,0,0),0.12)", paddingTop: "0.5rem" }}
+          data-ambiguous={ambiguous ? "true" : "false"}
+          className={ambiguous ? "pc-picker pc-picker--attention" : "pc-picker"}
         >
           <button
             type="button"
             data-testid={`picker-toggle-${canonicalItemId}`}
             aria-expanded={expanded}
             disabled={decided}
-            onClick={() => setExpandedPicker(expanded ? null : canonicalItemId)}
+            onClick={toggle}
             style={{
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
+              gap: "0.5rem",
               width: "100%",
               background: "transparent",
               border: "none",
               padding: "0.25rem 0",
               cursor: decided ? "default" : "pointer",
-              color: "var(--ion-color-warning, #b26a00)",
-              fontSize: "0.8rem",
-              fontWeight: 600,
+              color: ambiguous ? "var(--ion-color-primary)" : "var(--ion-color-warning, #b26a00)",
+              fontSize: ambiguous ? "0.86rem" : "0.8rem",
+              fontWeight: 700,
+              textAlign: "left",
             }}
           >
-            <span>Approximate match — choose a different option ({candidates.length})</span>
+            <span>{ambiguous ? "⚠️ " : ""}{headerText}</span>
             <span aria-hidden>{expanded ? "▲" : "▼"}</span>
           </button>
           {expanded ? (
@@ -346,7 +379,7 @@ export function ComparisonPage({
         </div>
       );
     },
-    [decided, expandedPicker, handleSelectSku, selectedQuoteFor, state.candidatesByItem],
+    [collapsedAmbig, decided, expandedPicker, handleSelectSku, selectedQuoteFor, state.candidatesByItem],
   );
 
   const renderLineControls = useCallback(
@@ -360,6 +393,7 @@ export function ComparisonPage({
           <IonButton
             data-testid={`qty-dec-${line.canonicalItemId}`}
             aria-label={`decrease ${line.itemName}`}
+            disabled={decided || demandQty(line.itemName) <= 1}
             onClick={() => handleQtyDelta(line, -1)}
           >
             −
@@ -391,7 +425,7 @@ export function ComparisonPage({
         </IonButtons>
       );
     },
-    [decided, editing, handleDrop, handleQtyDelta, handleSwap],
+    [decided, demandQty, editing, handleDrop, handleQtyDelta, handleSwap],
   );
 
   const savingPaise = allocation?.savingPaise ?? 0;
@@ -579,7 +613,7 @@ export function ComparisonPage({
                           );
                         })}
                       </div>
-                      {renderNearbyPicker(item, canonicalItemId)}
+                      {renderProductPicker(item, canonicalItemId)}
                     </div>
                   );
                 })}
@@ -596,14 +630,16 @@ export function ComparisonPage({
                 <span className="pc-platform__name" style={{ fontSize: "1rem" }}>
                   What this means
                 </span>
-                <IonButton
-                  data-testid="readback-button"
-                  fill="clear"
-                  size="small"
-                  onClick={handleReadBack}
-                >
-                  🔊 Read back
-                </IonButton>
+                {ttsAvailable ? (
+                  <IonButton
+                    data-testid="readback-button"
+                    fill="clear"
+                    size="small"
+                    onClick={handleReadBack}
+                  >
+                    🔊 Read back
+                  </IonButton>
+                ) : null}
               </div>
               <div className="pc-card__body">
                 <pre

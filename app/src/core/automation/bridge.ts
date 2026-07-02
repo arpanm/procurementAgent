@@ -65,6 +65,7 @@ export interface InAppBrowserBridge {
   call(
     id: string,
     codeFactory: (requestId: string) => string,
+    opts?: { mutating?: boolean },
   ): Promise<Record<string, unknown>>;
 
   /**
@@ -109,6 +110,9 @@ function normalizeInboundDetail(event: {
   return detail;
 }
 
+/** Safety backstop for a login window whose close event is missed (15 min — far beyond any real sign-in). */
+const LOGIN_SESSION_MAX_WAIT_MS = 15 * 60 * 1000;
+
 function randomRequestId(): string {
   const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
   if (c && typeof c.randomUUID === "function") return c.randomUUID();
@@ -133,7 +137,13 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
    */
   private readonly pendingMeta = new Map<
     string,
-    { id: string; codeFactory: (requestId: string) => string; reinjects: number }
+    {
+      id: string;
+      codeFactory: (requestId: string) => string;
+      reinjects: number;
+      /** Mutating actions (click/type/select) must NOT be blindly re-injected — see reinjectPending. */
+      mutating: boolean;
+    }
   >();
   private readonly messageListeners = new Set<BridgeMessageListener>();
   private readonly urlListeners = new Set<BridgeUrlChangeListener>();
@@ -175,6 +185,7 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
       const timer = this.pendingTimers.get(rid);
       if (timer) clearTimeout(timer);
       this.pendingTimers.delete(rid);
+      this.releaseCall(rid);
       if (resolve) resolve(detail);
       return;
     }
@@ -182,10 +193,13 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
   }
 
   /**
-   * Re-inject every in-flight call targeting `logicalId` into the (just-loaded) page. Called when the
-   * webview fires a page-load event, so a navigation that wiped our injected scripts mid-call doesn't
-   * strand the `call()` at its timeout. Idempotent reads (settle/perceive) re-run harmlessly; an action
-   * undone by the reload is correctly re-applied. `onReinject` lets subclasses trace it.
+   * Re-inject every in-flight IDEMPOTENT call targeting `logicalId` into the (just-loaded) page. Called
+   * when the webview fires a page-load event, so a navigation that wiped our injected scripts mid-call
+   * doesn't strand the `call()` at its timeout. Idempotent reads (settle/perceive) re-run harmlessly.
+   *
+   * MUTATING calls (click/type/select) are deliberately SKIPPED: re-dispatching a click after a mid-action
+   * reload could apply it twice (e.g. add the same item to the cart twice). Such a call is left to time out
+   * and be retried by the higher-level, effect-verifying logic instead.
    */
   protected reinjectPending(
     logicalId: string,
@@ -193,6 +207,7 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
   ): void {
     for (const [rid, meta] of this.pendingMeta) {
       if (meta.id !== logicalId) continue;
+      if (meta.mutating) continue;
       if (meta.reinjects >= this.maxReinjects) continue;
       meta.reinjects += 1;
       onReinject?.(rid, meta.reinjects);
@@ -202,6 +217,11 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
     }
   }
 
+  /** Hook: a call has settled (resolved/timed out/errored). Subclasses release any per-rid transport state. */
+  protected releaseCall(_rid: string): void {
+    /* default no-op; CapgoBridge drops its chunk-reassembly buffer */
+  }
+
   protected emitUrlChange(url: string, id?: string): void {
     for (const listener of this.urlListeners) listener(url, id);
   }
@@ -209,16 +229,18 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
   call(
     id: string,
     codeFactory: (requestId: string) => string,
+    opts?: { mutating?: boolean },
   ): Promise<Record<string, unknown>> {
     const rid = randomRequestId();
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       this.pending.set(rid, resolve);
-      this.pendingMeta.set(rid, { id, codeFactory, reinjects: 0 });
+      this.pendingMeta.set(rid, { id, codeFactory, reinjects: 0, mutating: opts?.mutating ?? false });
       const timer = setTimeout(() => {
         if (this.pending.has(rid)) {
           this.pending.delete(rid);
           this.pendingMeta.delete(rid);
           this.pendingTimers.delete(rid);
+          this.releaseCall(rid);
           reject(new Error(`Bridge call timed out after ${this.callTimeoutMs}ms`));
         }
       }, this.callTimeoutMs);
@@ -229,6 +251,7 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
           this.pendingMeta.delete(rid);
           clearTimeout(timer);
           this.pendingTimers.delete(rid);
+          this.releaseCall(rid);
           reject(err instanceof Error ? err : new Error(String(err)));
         }
       });
@@ -243,7 +266,34 @@ export abstract class AbstractBridge implements InAppBrowserBridge {
 export class CapgoBridge extends AbstractBridge {
   private readonly idMap = new Map<string, string>();
   /** In-flight reassembly buffers for the chunked console reply transport, keyed by requestId. */
-  private readonly bridgeChunks = new Map<string, { total: number; parts: Map<number, string> }>();
+  private readonly bridgeChunks = new Map<
+    string,
+    { total: number; parts: Map<number, string>; createdAt: number }
+  >();
+  /** Drop a partial reassembly older than this (a reply whose remaining chunks never arrived). */
+  private static readonly CHUNK_TTL_MS = 20000;
+  /** Hard cap on concurrent partial reassemblies, so a misbehaving page can't grow the map unbounded. */
+  private static readonly MAX_CHUNK_ENTRIES = 64;
+
+  /** Release a settled call's partial reassembly buffer (M7): no more chunks will arrive for it. */
+  protected override releaseCall(rid: string): void {
+    this.bridgeChunks.delete(rid);
+  }
+
+  /** Evict stale (never-completed) and, if over cap, the oldest partial reassemblies. */
+  private pruneChunkBuffers(now: number): void {
+    for (const [rid, entry] of this.bridgeChunks) {
+      if (now - entry.createdAt > CapgoBridge.CHUNK_TTL_MS) this.bridgeChunks.delete(rid);
+    }
+    if (this.bridgeChunks.size > CapgoBridge.MAX_CHUNK_ENTRIES) {
+      const oldestFirst = [...this.bridgeChunks.entries()].sort(
+        (a, b) => a[1].createdAt - b[1].createdAt,
+      );
+      for (const [rid] of oldestFirst.slice(0, this.bridgeChunks.size - CapgoBridge.MAX_CHUNK_ENTRIES)) {
+        this.bridgeChunks.delete(rid);
+      }
+    }
+  }
 
   constructor(private readonly plugin: InAppBrowserPlugin = InAppBrowser) {
     super();
@@ -316,9 +366,11 @@ export class CapgoBridge extends AbstractBridge {
     const total = Number.parseInt(totalStr, 10);
     if (!Number.isFinite(seq) || !Number.isFinite(total) || total < 1) return;
 
+    const now = Date.now();
     let entry = this.bridgeChunks.get(rid);
     if (!entry) {
-      entry = { total, parts: new Map<number, string>() };
+      this.pruneChunkBuffers(now);
+      entry = { total, parts: new Map<number, string>(), createdAt: now };
       this.bridgeChunks.set(rid, entry);
     }
     entry.parts.set(seq, chunk);
@@ -456,28 +508,34 @@ export class CapgoBridge extends AbstractBridge {
    * WebView store, so the subsequent (hidden or visible) scrape runs authenticated.
    */
   async openLoginSession(id: string, url: string): Promise<void> {
-    const res = await this.plugin.openWebView({
-      url,
-      toolbarType: ToolBarType.NAVIGATION,
-      ...this.openOptions(),
-    });
-    if (res && typeof res.id === "string") this.idMap.set(id, res.id);
     await new Promise<void>((resolve) => {
       let handle: { remove: () => Promise<void> } | undefined;
       let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const finish = (): void => {
         if (done) return;
         done = true;
         this.idMap.delete(id);
+        if (timer) clearTimeout(timer);
         void handle?.remove();
         resolve();
       };
+      // Register the close listener BEFORE opening the window, so a very fast close can't fire in the gap
+      // between openWebView resolving and addListener completing (which would strand this promise).
       void this.plugin
         .addListener("closeEvent", finish)
         .then((h) => {
           handle = h;
           if (done) void h.remove();
         });
+      void this.plugin
+        .openWebView({ url, toolbarType: ToolBarType.NAVIGATION, ...this.openOptions() })
+        .then((res) => {
+          if (res && typeof res.id === "string") this.idMap.set(id, res.id);
+        })
+        .catch(() => finish());
+      // Safety backstop: never hang forever if the close event is somehow missed.
+      timer = setTimeout(finish, LOGIN_SESSION_MAX_WAIT_MS);
     });
   }
 }

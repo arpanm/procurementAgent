@@ -1,6 +1,6 @@
 /**
  * Procure Copilot brand mark — an inline, self-contained SVG so it needs no asset pipeline and
- * inherits crisp rendering at any size. A rounded indigo badge with a rupee glyph and an upward
+ * inherits crisp rendering at any size. A rounded red badge with a rupee glyph and an upward
  * "savings" spark, echoing the product promise: spend less, move fast. Presentational only.
  */
 
@@ -28,8 +28,8 @@ export function BrandLogo({ size = 32, className, title }: BrandLogoProps): JSX.
     >
       <defs>
         <linearGradient id={gradientId} x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0%" stopColor="#6366f1" />
-          <stop offset="100%" stopColor="#7c3aed" />
+          <stop offset="0%" stopColor="#ff6b73" />
+          <stop offset="100%" stopColor="#e23744" />
         </linearGradient>
       </defs>
       <rect x="0" y="0" width="48" height="48" rx="13" fill={`url(#${gradientId})`} />

@@ -6,6 +6,7 @@
 import { IonNote, IonText } from "@ionic/react";
 import type { OrderAttempt } from "../../core/domain/types";
 import { formatRupees } from "../../core/domain/types";
+import { platformLabel } from "../../core/config";
 
 export interface OrderReceiptCardProps {
   readonly attempt: OrderAttempt;
@@ -22,15 +23,13 @@ const STATUS_LABEL: Record<OrderAttempt["status"], string> = {
 
 export function OrderReceiptCard({ attempt }: OrderReceiptCardProps): JSX.Element {
   const placed = attempt.status === "placed";
-  const capitalizedPlatform =
-    attempt.platform.charAt(0).toUpperCase() + attempt.platform.slice(1);
 
   return (
     <section className="pc-card" data-testid={`receipt-${attempt.platform}`}>
       <div className="pc-card__head">
         <span className={`pc-platform pc-platform--${attempt.platform}`}>
           <span className="pc-platform__dot" />
-          <span className="pc-platform__name">{capitalizedPlatform}</span>
+          <span className="pc-platform__name">{platformLabel(attempt.platform)}</span>
         </span>
         <span
           className="pc-platform-pill"

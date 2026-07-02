@@ -12,7 +12,17 @@ import type {
 } from "../domain/types";
 import type { EngineAction, Observation } from "../automation/AutomationEngine";
 import type { KnowledgeTransport } from "../knowledge/PlatformKnowledgeStore";
+import { BACKEND_API_TOKEN } from "../config";
 import { isAutomationDebug, traceAutomation } from "../debug/automationDebug";
+
+/** Base JSON headers plus the bearer token when the backend requires one (production). */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...extra };
+  if (BACKEND_API_TOKEN) {
+    headers["Authorization"] = `Bearer ${BACKEND_API_TOKEN}`;
+  }
+  return headers;
+}
 
 /**
  * Compact one-line summary of a request body for the debug log, so every backend call — especially the
@@ -284,7 +294,7 @@ export class HttpBackendClient implements BackendClient {
       res = await this.withTimeout(path, (signal) =>
         this.fetchImpl(`${base}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: authHeaders({ "content-type": "application/json" }),
           body: JSON.stringify(body),
           signal,
         }),
@@ -310,7 +320,7 @@ export class HttpBackendClient implements BackendClient {
     let res;
     try {
       res = await this.withTimeout(path, (signal) =>
-        this.fetchImpl(`${base}${path}`, { signal }),
+        this.fetchImpl(`${base}${path}`, { headers: authHeaders(), signal }),
       );
     } catch (err) {
       this.onTransportError();

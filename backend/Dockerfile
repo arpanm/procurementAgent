@@ -15,10 +15,17 @@ RUN mvn -B -q clean package -DskipTests
 FROM eclipse-temurin:21-jre AS runtime
 WORKDIR /app
 
-# Run as a non-root user.
-RUN useradd -r -u 1001 appuser
+# Run as a non-root user. Create the H2 data dir and hand it to appuser BEFORE dropping
+# privileges — otherwise the default file datasource (/app/data/procure) can't be created by
+# uid 1001 and the container crash-loops on Hibernate "Unable to determine Dialect".
+RUN useradd -r -u 1001 appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app/data
 COPY --from=build /workspace/target/procure-copilot-backend-*.jar app.jar
 USER appuser
+
+# Persist the embedded DB here; mount a volume at /app/data to survive container recreation.
+VOLUME ["/app/data"]
 
 EXPOSE 8080
 

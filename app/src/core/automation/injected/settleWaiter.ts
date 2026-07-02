@@ -98,43 +98,63 @@ export function buildSettleScript(requestId: string): string {
   ${bridgeEmitFnSource()}
   var RID = ${JSON.stringify(requestId)};
   try { console.log('[hpinj] settle start rid=' + RID + ' mobileApp=' + (typeof (window.mobileApp))); } catch (e) {}
-  var inflight = 0, timer = null, done = false;
+
+  // Shared document-level state, installed ONCE. Re-injecting this script every perceive/settle cycle
+  // previously re-wrapped window.fetch / XHR.send and added a fresh MutationObserver each time, stacking
+  // wrappers and leaking observers over a long run. Now fetch/XHR/observer are patched a single time and
+  // drive a shared inflight counter + a list of per-call bump listeners; each settle registers its bump
+  // and removes it on finish.
+  var G = window.__hpSettle;
+  if (!G) {
+    G = window.__hpSettle = { inflight: 0, bumps: [] };
+    G.fire = function () {
+      var list = G.bumps.slice();
+      for (var i = 0; i < list.length; i++) { try { list[i](); } catch (e) {} }
+    };
+    var origFetch = window.fetch;
+    if (origFetch) {
+      window.fetch = function () {
+        G.inflight++; G.fire();
+        return origFetch.apply(this, arguments).finally(function () { G.inflight--; G.fire(); });
+      };
+    }
+    // Many SPAs (Hyperpure/Zomato use axios) load their product grid over XMLHttpRequest, not fetch.
+    // Track XHR inflight so settle waits for the listing's data call + React render, not just the shell.
+    try {
+      var XHR = window.XMLHttpRequest;
+      if (XHR && XHR.prototype && XHR.prototype.send) {
+        var origSend = XHR.prototype.send;
+        XHR.prototype.send = function () {
+          var self = this, settled = false;
+          var fin = function () { if (settled) return; settled = true; G.inflight--; G.fire(); };
+          try { G.inflight++; G.fire(); self.addEventListener('loadend', fin); }
+          catch (e) { fin(); }
+          return origSend.apply(this, arguments);
+        };
+      }
+    } catch (e) {}
+    try {
+      new MutationObserver(G.fire).observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+  }
+
+  var timer = null, done = false;
+  function unregister() {
+    var i = G.bumps.indexOf(bump);
+    if (i >= 0) G.bumps.splice(i, 1);
+  }
   function finish() {
     if (done) return; done = true;
-    try { console.log('[hpinj] settle finish rid=' + RID + ' inflight=' + inflight); } catch (e) {}
+    unregister();
+    try { console.log('[hpinj] settle finish rid=' + RID + ' inflight=' + G.inflight); } catch (e) {}
     __hpEmit(RID, { requestId: RID, type: 'ready' });
   }
   function bump() {
     if (done) return;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(function () { if (inflight === 0) finish(); }, ${DEFAULT_DEBOUNCE_MS});
+    timer = setTimeout(function () { if (G.inflight === 0) finish(); }, ${DEFAULT_DEBOUNCE_MS});
   }
-  var origFetch = window.fetch;
-  if (origFetch) {
-    window.fetch = function () {
-      inflight++; bump();
-      return origFetch.apply(this, arguments).finally(function () { inflight--; bump(); });
-    };
-  }
-  // Many SPAs (Hyperpure/Zomato use axios) load their product grid over XMLHttpRequest, not fetch.
-  // Without tracking XHR, settle fires on the bare shell BEFORE the priced tiles render, so perceive
-  // sees only the sidebar. Track XHR inflight so we wait for the listing's data call + React render.
-  try {
-    var XHR = window.XMLHttpRequest;
-    if (XHR && XHR.prototype && XHR.prototype.send) {
-      var origSend = XHR.prototype.send;
-      XHR.prototype.send = function () {
-        var self = this, settled = false;
-        var fin = function () { if (settled) return; settled = true; inflight--; bump(); };
-        try { inflight++; bump(); self.addEventListener('loadend', fin); }
-        catch (e) { fin(); }
-        return origSend.apply(this, arguments);
-      };
-    }
-  } catch (e) {}
-  try {
-    new MutationObserver(bump).observe(document.documentElement, { childList: true, subtree: true });
-  } catch (e) {}
+  G.bumps.push(bump);
   setTimeout(finish, ${DEFAULT_HARD_CAP_MS});
   bump();
 })();`;

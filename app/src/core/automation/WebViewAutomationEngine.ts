@@ -875,8 +875,14 @@ export class WebViewAutomationEngine implements AutomationEngine {
       await this.settle();
       return { ok: true };
     }
-    const detail = await this.bridge.call(this.webviewId, (rid) =>
-      buildActionScript(rid, action),
+    // click/type/select mutate the page — flag them so the bridge never blindly re-injects them after a
+    // mid-action reload (which could double-apply the effect, e.g. add the same item twice).
+    const mutating =
+      action.type === "click" || action.type === "type" || action.type === "select";
+    const detail = await this.bridge.call(
+      this.webviewId,
+      (rid) => buildActionScript(rid, action),
+      { mutating },
     );
     await this.settle();
     return {

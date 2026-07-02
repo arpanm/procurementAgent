@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import ai.procurecopilot.backend.common.Domain;
 import ai.procurecopilot.backend.llm.AnthropicProperties;
 import ai.procurecopilot.backend.llm.ClaudeService;
+import ai.procurecopilot.backend.llm.LlmProperties;
+import ai.procurecopilot.backend.llm.OllamaClient;
 import ai.procurecopilot.backend.llm.SecretScrubber;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
@@ -210,8 +212,11 @@ class IntentServiceTest {
     private static ClaudeService stubClaude() {
         AnthropicProperties props =
                 new AnthropicProperties("http://localhost", "", "2023-06-01", "model", 2048, true);
+        LlmProperties llm = new LlmProperties("anthropic", null);
         return new ClaudeService(
                 props,
+                llm,
+                new OllamaClient(llm, new ObjectMapper(), WebClient.builder()),
                 new SecretScrubber(),
                 new ObjectMapper(),
                 List.of(new IntentResponder()),

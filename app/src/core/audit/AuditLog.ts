@@ -33,12 +33,40 @@ export interface AuditEntry extends AuditEvent {
   readonly hash: string;
 }
 
-/** A synchronous, deterministic string hash. Injectable so production can use Web Crypto. */
-export type Hasher = (input: string) => string;
+/** A deterministic string hash. May be sync or async so production can use Web Crypto (SHA-256). */
+export type Hasher = (input: string) => string | Promise<string>;
+
+/**
+ * Cryptographic SHA-256 hasher over Web Crypto (`crypto.subtle`) — the production default whenever it is
+ * available (real Android WebView, modern browsers). Async, hence {@link Hasher} allows a Promise.
+ */
+export async function sha256Hasher(input: string): Promise<string> {
+  const data = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** True when Web Crypto SHA-256 is usable in this runtime. */
+function hasWebCrypto(): boolean {
+  try {
+    return typeof crypto !== "undefined" && typeof crypto.subtle?.digest === "function";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The best available hasher: cryptographic SHA-256 when Web Crypto is present (production), else the
+ * deterministic {@link defaultHasher} (jsdom / environments without `crypto.subtle`).
+ */
+export function preferredHasher(): Hasher {
+  return hasWebCrypto() ? sha256Hasher : defaultHasher;
+}
 
 /**
  * Default hasher — cyrb53, a small deterministic non-cryptographic hash. Good enough to make casual
- * tampering evident in tests and web preview; inject a `crypto.subtle`-backed SHA-256 in production.
+ * tampering evident in tests and web preview; production uses {@link sha256Hasher} via
+ * {@link preferredHasher}.
  */
 export function defaultHasher(input: string): string {
   let h1 = 0xdeadbeef;
@@ -90,7 +118,7 @@ export class AuditLog {
     await this.store.set(this.namespace, JSON.stringify(entries));
   }
 
-  private hashOf(entry: AuditEntry): string {
+  private async hashOf(entry: AuditEntry): Promise<string> {
     return this.hasher(`${entry.prevHash}|${payloadOf(entry)}`);
   }
 
@@ -107,7 +135,7 @@ export class AuditLog {
       // Placeholder; replaced below once the real hash is computed over the payload.
       hash: "",
     };
-    const hash = this.hashOf(partial);
+    const hash = await this.hashOf(partial);
     const entry: AuditEntry = { ...partial, hash };
 
     await this.save([...entries, entry]);
@@ -135,7 +163,7 @@ export class AuditLog {
       if (entry.prevHash !== expectedPrev) {
         return false;
       }
-      if (this.hashOf(entry) !== entry.hash) {
+      if ((await this.hashOf(entry)) !== entry.hash) {
         return false;
       }
       expectedPrev = entry.hash;

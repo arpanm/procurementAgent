@@ -187,6 +187,26 @@ export function findAmazonResultCard(
   return best;
 }
 
+// --- quantity control --------------------------------------------------------
+
+/**
+ * Find Amazon's detail-page quantity `<select>` (native `id="quantity" name="quantity"`, or the
+ * accessible "Quantity" combobox). Amazon's "Add to Cart" adds however many the dropdown has selected,
+ * so the agent must set this to the requested count — a bare add places exactly 1. Returns `null` when
+ * the page has no quantity control (e.g. a stepper-only layout), so the caller reports the honest 1.
+ */
+export function findQuantitySelect(obs: Observation): SerializedElement | null {
+  for (const el of obs.elements) {
+    const name = lower(el.attrs.name);
+    const isSelectish = el.tag === "select" || el.role === "combobox" || el.role === "listbox";
+    if (!isSelectish) continue;
+    if (name === "quantity" || name.includes("quantity") || lower(el.name).includes("quantity")) {
+      return el;
+    }
+  }
+  return null;
+}
+
 // --- product URL resolution --------------------------------------------------
 
 /**

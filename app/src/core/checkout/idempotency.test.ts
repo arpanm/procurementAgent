@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemorySecureStore } from "../secure/SecureStore";
 import type { PlatformAllocation } from "../domain/types";
-import { IdempotencyStore, newIdempotencyKey } from "./idempotency";
+import { IdempotencyReservedError, IdempotencyStore, newIdempotencyKey } from "./idempotency";
 
 function allocation(qty = 5): PlatformAllocation {
   return {
@@ -124,5 +124,30 @@ describe("IdempotencyStore", () => {
     const result = await reborn.withIdempotency("k", fn);
     expect(result).toEqual({ orderRef: "Z" });
     expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("refuses to re-place after a crash mid-placement (reserve-before-place)", async () => {
+    // Simulate a placement that reserved the key then died before committing a result: fn throws
+    // after the reservation is written, leaving the store with only the RESERVED marker.
+    const store = new InMemorySecureStore();
+    const guard = new IdempotencyStore(store);
+    await expect(
+      guard.withIdempotency("order-1", async () => {
+        throw new Error("network dropped after the platform may have accepted the order");
+      }),
+    ).rejects.toThrow("network dropped");
+
+    // A fresh guard (cold-start) must NOT blindly re-run fn — the outcome is unknown, so it raises.
+    const reborn = new IdempotencyStore(store);
+    const fn = vi.fn(async () => ({ orderRef: "SECOND" }));
+    await expect(reborn.withIdempotency("order-1", fn)).rejects.toBeInstanceOf(
+      IdempotencyReservedError,
+    );
+    expect(fn).not.toHaveBeenCalled();
+
+    // After a human confirms nothing was placed, clearing the key allows a clean retry.
+    await reborn.clear("order-1");
+    await expect(reborn.withIdempotency("order-1", fn)).resolves.toEqual({ orderRef: "SECOND" });
+    expect(fn).toHaveBeenCalledTimes(1);
   });
 });

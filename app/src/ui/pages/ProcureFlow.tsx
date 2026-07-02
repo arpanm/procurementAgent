@@ -15,6 +15,7 @@ import type { OrderAttempt, PlatformId, RequestedItem } from "../../core/domain/
 import type { BackendClient } from "../../core/backend/BackendClient";
 import { HttpBackendClient } from "../../core/backend/BackendClient";
 import { IntentClient } from "../../core/intent/IntentClient";
+import { speakText } from "../../core/intent/tts";
 import { Orchestrator } from "../../core/orchestrator/Orchestrator";
 import { CapgoBridge } from "../../core/automation/bridge";
 import type { InAppBrowserBridge } from "../../core/automation/bridge";
@@ -22,13 +23,14 @@ import type { AutomationEngine } from "../../core/automation/AutomationEngine";
 import { MockAutomationEngine } from "../../core/automation/__mocks__/MockAutomationEngine";
 import { createEngine } from "../../core/adapters";
 import { CheckoutDriver } from "../../core/checkout/CheckoutDriver";
+import { IdempotencyStore } from "../../core/checkout/idempotency";
 import { agentForEngine } from "../../core/agents/AgentRegistry";
 import { DefaultKnowledgeStore } from "../../core/knowledge/PlatformKnowledgeStore";
 import { BackendFailureReporter } from "../../core/knowledge/failureReporter";
 import { SiteMemory } from "../../core/knowledge/siteMemory";
 import { defaultPlatformPins } from "../../core/optimizer/defaultSelection";
-import { AuditLog } from "../../core/audit/AuditLog";
-import { InMemorySecureStore } from "../../core/secure/SecureStore";
+import { AuditLog, preferredHasher } from "../../core/audit/AuditLog";
+import { InMemorySecureStore, LocalStorageSecureStore } from "../../core/secure/SecureStore";
 import type { DomainEvent } from "../../core/automation/events";
 import { ACTIVE_PLATFORMS, BACKEND_BASE_URLS, PLATFORM_CART_URLS, PLATFORM_URLS } from "../../core/config";
 import { isAutomationDebug, traceAutomation } from "../../core/debug/automationDebug";
@@ -215,7 +217,33 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
     [props.orchestrator, backend],
   );
   const intentClient = useMemo(() => new IntentClient(backend), [backend]);
-  const audit = useMemo(() => new AuditLog(new InMemorySecureStore()), []);
+  // Durable, tamper-evident audit trail: a persistent store (survives cold-start) + a cryptographic
+  // SHA-256 hash chain in production. Demo uses an ephemeral in-memory store so preview runs don't
+  // accumulate. Integrity is checked on mount and any breakage surfaces in the debug trace.
+  const audit = useMemo(
+    () =>
+      new AuditLog(
+        isDemo ? new InMemorySecureStore() : new LocalStorageSecureStore("pc.secure.audit."),
+        "audit:log",
+        preferredHasher(),
+      ),
+    [isDemo],
+  );
+  useEffect(() => {
+    if (isDemo) return;
+    void audit.verifyIntegrity().then((ok) => {
+      if (!ok) traceAutomation("error", "audit log integrity check FAILED — chain broken", "backend");
+    });
+  }, [audit, isDemo]);
+  // Durable idempotency guard so a placement survives a cold-start (reserve-before-place prevents a
+  // double order after a mid-checkout crash). In-memory in demo.
+  const idempotency = useMemo(
+    () =>
+      new IdempotencyStore(
+        isDemo ? new InMemorySecureStore() : new LocalStorageSecureStore("pc.secure.idem."),
+      ),
+    [isDemo],
+  );
   // Guided-RAG knowledge: curated per-platform policies/hints that steer each agent. Backed by the
   // backend `/knowledge` endpoint via the client's shared transport (resolved-base + timeout), and always
   // falls back to safe built-in defaults when the backend is unreachable.
@@ -471,7 +499,12 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         humanResolverRef.current = resolve;
       });
 
-    const showWebView = isAutomationDebug();
+    // Add-to-cart requires a RENDERED webview: the ADD click resolves via document.elementFromPoint at
+    // the button's coordinates, and a HIDDEN (zero-size / unrendered) webview drops that click so the add
+    // never confirms — diagnosed live on-device (hidden fails, visible succeeds). So the staging phase
+    // always runs the webview VISIBLE, independent of the debug flag; the user briefly sees the platform's
+    // page as their items are added to the cart (an honest "adding to your cart" moment), then it closes.
+    const showWebView = true;
     const collected: OrderAttempt[] = [];
     for (const platformAllocation of allocation.perPlatform) {
       if (platformAllocation.lines.length === 0) {
@@ -497,6 +530,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
         agent,
         backend,
         audit,
+        idempotency,
         onEvent,
         awaitHuman,
         failureReporter,
@@ -678,7 +712,7 @@ export function ProcureFlow(props: ProcureFlowProps = {}): JSX.Element {
   switch (state.status) {
     case "awaiting_approval":
     case "modifying":
-      return <ComparisonPage orchestrator={orchestrator} />;
+      return <ComparisonPage orchestrator={orchestrator} speak={speakText} />;
     case "planning":
     case "quoting":
     case "optimizing":

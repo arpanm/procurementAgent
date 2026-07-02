@@ -81,4 +81,17 @@ describe("parseOrderConfirmation", () => {
     expect(parsed.orderRef).toBe("FALLBACK-1");
     expect(parsed.totalPaise).toBe(0);
   });
+
+  it("prefers a labelled grand total over an earlier line-item/fee figure", () => {
+    // The first ₹ figure is a line item; the real total is labelled lower down.
+    const text = "Onions ₹90\nDelivery fee ₹40\nGrand total ₹1,340.00";
+    const parsed = parseOrderConfirmation({ text });
+    expect(parsed.totalPaise).toBe(134000);
+  });
+
+  it("does not mistake a subtotal for the grand total", () => {
+    const text = "Subtotal ₹1,200\nTotal payable ₹1,260";
+    const parsed = parseOrderConfirmation({ text });
+    expect(parsed.totalPaise).toBe(126000);
+  });
 });

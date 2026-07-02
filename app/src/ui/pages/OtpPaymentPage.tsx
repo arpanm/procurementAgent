@@ -10,6 +10,7 @@
 import { IonButton, IonContent, IonFooter, IonPage } from "@ionic/react";
 import type { PlatformId } from "../../core/domain/types";
 import { formatRupees } from "../../core/domain/types";
+import { platformLabel } from "../../core/config";
 import { BrandHeader } from "../components/BrandHeader";
 
 export interface OtpPaymentPageProps {
@@ -37,8 +38,7 @@ export function OtpPaymentPage({
   revealed = false,
 }: OtpPaymentPageProps): JSX.Element {
   const title = kind === "otp" ? "Enter OTP" : "Complete payment";
-  const capitalizedPlatform =
-    platform.charAt(0).toUpperCase() + platform.slice(1);
+  const capitalizedPlatform = platformLabel(platform);
   const instruction =
     kind === "otp"
       ? `Switch to ${capitalizedPlatform} and enter the OTP they sent you.`
@@ -95,6 +95,7 @@ export function OtpPaymentPage({
             expand="block"
             fill="outline"
             color="success"
+            disabled={!revealed}
             onClick={onDone}
           >
             I&apos;ve done this

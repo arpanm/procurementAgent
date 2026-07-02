@@ -23,6 +23,8 @@ public class ClaudeService {
     private static final Logger log = LoggerFactory.getLogger(ClaudeService.class);
 
     private final AnthropicProperties props;
+    private final LlmProperties llm;
+    private final OllamaClient ollama;
     private final SecretScrubber scrubber;
     private final ObjectMapper mapper;
     private final Map<String, ClaudeResponder> responders;
@@ -30,11 +32,15 @@ public class ClaudeService {
 
     public ClaudeService(
             AnthropicProperties props,
+            LlmProperties llm,
+            OllamaClient ollama,
             SecretScrubber scrubber,
             ObjectMapper mapper,
             List<ClaudeResponder> stubResponders,
             WebClient.Builder webClientBuilder) {
         this.props = props;
+        this.llm = llm;
+        this.ollama = ollama;
         this.scrubber = scrubber;
         this.mapper = mapper;
         this.responders = stubResponders.stream()
@@ -52,13 +58,17 @@ public class ClaudeService {
                 request.imageBase64(),
                 request.imageMediaType());
 
-        if (props.isStub()) {
+        if (isStub()) {
             ClaudeResponder responder = responders.get(scrubbed.task());
             if (responder != null) {
                 return responder.respond(scrubbed);
             }
             log.debug("No stub responder for task '{}', returning empty object", scrubbed.task());
             return "{}";
+        }
+        // Free/local path: talk to Ollama instead of Anthropic when selected.
+        if (llm.isOllama()) {
+            return ollama.complete(scrubbed);
         }
         return callApi(scrubbed);
     }
@@ -93,8 +103,14 @@ public class ClaudeService {
                 case 429 -> " — rate limited / quota exhausted; retry later or check billing";
                 default -> "";
             };
+            // Scrub + truncate the error body before logging: an upstream error may echo back part of the
+            // request payload, so run it through the same SecretScrubber and bound its length.
+            String body404 = scrubber.scrub(e.getResponseBodyAsString());
+            if (body404 != null && body404.length() > 500) {
+                body404 = body404.substring(0, 500) + "…";
+            }
             log.error("Anthropic {} for task {}{} · body={}",
-                    e.getStatusCode(), request.task(), hint, e.getResponseBodyAsString());
+                    e.getStatusCode(), request.task(), hint, body404);
             throw new ClaudeException(
                     "Anthropic " + e.getStatusCode() + " for task " + request.task() + hint, e);
         } catch (Exception e) {
