@@ -24,8 +24,39 @@ export interface ConfirmationInput {
 const ORDER_REF_RE =
   /order\s*(?:id|no\.?|number|reference|ref)\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9-]{3,})/i;
 
-/** Rupee total: "₹1,234.50", "Rs 980", "Total ₹2,000". */
+/** A bare rupee figure: "₹1,234.50", "Rs 980" — used only as a last resort (see extractTotalPaise). */
 const RUPEES_RE = /(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/i;
+
+/**
+ * A rupee amount adjacent to an unambiguous grand-total label ("Grand total ₹2,000", "Amount paid:
+ * ₹980", "Total payable ₹1,340"). Preferred over any bare figure so we don't record a line-item or fee
+ * as the order total.
+ */
+const TOTAL_LABEL_RE =
+  /(?:grand\s*total|order\s*total|total\s*amount|amount\s*paid|total\s*payable|net\s*payable|amount\s*(?:to\s*)?pay(?:able)?|you\s*pay)\s*[:#-]?\s*(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/i;
+
+/** A plainer "Total ₹X" that is NOT a "Subtotal" / "Item total" (those aren't the grand total). */
+const PLAIN_TOTAL_RE =
+  /(?<!sub)(?<!item\s)\btotal\b\s*[:#-]?\s*(?:₹|rs\.?|inr)\s*([\d,]+(?:\.\d{1,2})?)/i;
+
+/**
+ * Extract the order total in paise from confirmation text, preferring a total-LABELLED amount over a
+ * bare rupee figure. Order of preference: an explicit grand-total label → a plain "Total …" that isn't a
+ * subtotal → the first rupee figure anywhere (last resort, degraded path). Returns null when no rupee
+ * amount is present.
+ */
+function extractTotalPaise(haystack: string): number | null {
+  for (const re of [TOTAL_LABEL_RE, PLAIN_TOTAL_RE, RUPEES_RE]) {
+    const match = re.exec(haystack);
+    if (match) {
+      const paise = rupeesToPaise(match[1]);
+      if (Number.isFinite(paise)) {
+        return paise;
+      }
+    }
+  }
+  return null;
+}
 
 const CREDIT_RE = /\b(?:paid\s+on\s+credit|on\s+credit|credit\s+line|pay\s+later)\b/i;
 
@@ -73,11 +104,7 @@ export function parseOrderConfirmation(input: ConfirmationInput): ParsedConfirma
   if (input.result && Number.isFinite(input.result.totalPaise)) {
     totalPaise = input.result.totalPaise;
   } else if (haystack) {
-    const match = RUPEES_RE.exec(haystack);
-    if (match) {
-      const paise = rupeesToPaise(match[1]);
-      totalPaise = Number.isFinite(paise) ? paise : null;
-    }
+    totalPaise = extractTotalPaise(haystack);
   }
 
   // --- paid on credit ---

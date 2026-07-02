@@ -5,7 +5,7 @@ spring:
   # Defaults to a local H2 file DB so state survives restarts; override the three properties
   # below (e.g. SPRING_DATASOURCE_URL=jdbc:postgresql://…) to point at Postgres in production.
   datasource:
-    url: ${SPRING_DATASOURCE_URL:jdbc:h2:file:./data/procure;AUTO_SERVER=TRUE}
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:file:./data/procure}
     username: ${SPRING_DATASOURCE_USERNAME:sa}
     password: ${SPRING_DATASOURCE_PASSWORD:}
   jpa:
@@ -37,11 +37,32 @@ anthropic:
   # of calling the live API. Lets the whole agent loop run in CI without a key.
   stub-mode: ${ANTHROPIC_STUB_MODE:true}
 
+# LLM provider. `anthropic` (default, paid) or `ollama` (free, local — no key, no egress). For a
+# fully-free setup: LLM_PROVIDER=ollama + ANTHROPIC_STUB_MODE=false + a running Ollama with the models
+# pulled (`ollama pull qwen2.5:7b` and `ollama pull qwen2.5vl:7b`). See OllamaClient.
+llm:
+  provider: ${LLM_PROVIDER:anthropic}
+  ollama:
+    base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:qwen2.5:7b}
+    vision-model: ${OLLAMA_VISION_MODEL:qwen2.5vl:7b}
+
 procure:
   optimizer:
     # Price tolerance (fraction) the verifier allows between approved plan and live cart.
     price-tolerance: 0.05
   cors:
     # Comma-separated allowed origin patterns for the device app (Vite dev server + Capacitor
-    # WebView). Permissive by default for local dev; restrict to your app origins in production.
+    # WebView). Permissive by default for local dev; restrict to your app origins in production
+    # (the 'prod' profile rejects '*' — see CorsConfig).
     allowed-origins: ${PROCURE_CORS_ALLOWED_ORIGINS:*}
+
+  security:
+    # Bearer token required on every request when set. Blank ⇒ auth disabled (local dev / CI / demo);
+    # the 'prod' profile requires it (no default) so production never comes up open. See SecurityProperties.
+    api-token: ${PROCURE_API_TOKEN:}
+    # Extra token for risky operator-only mutations (promote/reject gated patch, force eval run, push
+    # playbook). Falls back to api-token when blank.
+    operator-token: ${PROCURE_OPERATOR_TOKEN:}
+    # Per-minute cap per caller on the billable LLM endpoints (only enforced when auth is enabled).
+    rate-limit-per-minute: ${PROCURE_RATE_LIMIT_PER_MINUTE:120}

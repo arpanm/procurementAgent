@@ -56,8 +56,10 @@ public class KnowledgeService {
         KnowledgeDoc current = fromEntity(entity);
         List<KnowledgeNote> notes = new ArrayList<>(current.notes());
         notes.add(new KnowledgeNote(Instant.now().toString(), kind, text));
+        // Bump the doc version so every mutation is monotonic — the device uses the version to tell when
+        // the curated doc actually changed; a static version would make an appended observation invisible.
         KnowledgeDoc updated = new KnowledgeDoc(
-                current.platform(), current.version(), current.policies(), current.hints(), notes);
+                current.platform(), current.version() + 1, current.policies(), current.hints(), notes);
         entity.update(updated.version(), toJson(updated), Instant.now());
         repo.save(entity);
         return updated;

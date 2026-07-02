@@ -12,11 +12,6 @@
   --background: var(--ion-background-color);
 }
 
-.pc-scroll-pad {
-  /* Leave room for the sticky action bar so content is never hidden behind it. */
-  padding-bottom: 160px;
-}
-
 .pc-section {
   margin: 18px 4px;
 }
@@ -95,9 +90,10 @@
 
 .pc-hero__title {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.72rem;
   font-weight: 800;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.035em;
+  line-height: 1.12;
 }
 
 .pc-hero__subtitle {
@@ -378,6 +374,21 @@
   font-weight: 600;
 }
 
+/* ---------------------------------------------------------------- Language selector */
+
+.pc-lang-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 4px 8px;
+}
+
+.pc-lang-select {
+  font-size: 0.85rem;
+  min-height: 36px;
+  max-width: 50%;
+  color: var(--pc-text-muted);
+}
+
 /* ---------------------------------------------------------------- Composer (chat input) */
 
 .pc-composer {
@@ -648,10 +659,17 @@
   --border-radius: 14px;
   --padding-top: 18px;
   --padding-bottom: 18px;
-  font-weight: 700;
-  font-size: 1rem;
+  --box-shadow: 0 8px 20px rgba(var(--ion-color-primary-rgb), 0.28);
+  font-weight: 800;
+  font-size: 1.02rem;
+  letter-spacing: 0.01em;
   margin: 0;
   text-transform: none;
+  transition: transform 0.12s ease;
+}
+
+.pc-cta:active {
+  transform: scale(0.985);
 }
 
 /* ---------------------------------------------------------------- Hand-off (OTP/payment) */
@@ -845,5 +863,69 @@
   .pc-mic--listening,
   .pc-listening-dot {
     animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------- Per-item choice button
+ * Backs the `.pc-choice` class used by ComparisonPage's per-platform / nearby-SKU pickers.
+ * The component sets padding/border/background inline; this rule guarantees an accessible
+ * >=48px touch target and normalises the native <button> so a mis-tap can't silently re-pin
+ * an item to a pricier platform. */
+.pc-choice {
+  min-height: 48px;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pc-choice:disabled {
+  cursor: default;
+}
+
+.pc-choice:not(:disabled):active {
+  transform: scale(0.99);
+}
+
+/* ---------------------------------------------------------------- Product picker
+ * The per-item SKU chooser. The default (nearby) variant is a quiet dashed-top affordance; the
+ * `--attention` variant is used when the query was AMBIGUOUS (multiple distinct products matched) and
+ * needs a prominent, tinted card so the user picks the right product before proceeding. */
+.pc-picker {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(var(--ion-text-color-rgb, 0, 0, 0), 0.12);
+}
+
+.pc-picker--attention {
+  padding: 12px 14px;
+  border: 1px solid rgba(var(--ion-color-primary-rgb), 0.3);
+  border-radius: var(--pc-radius-sm);
+  background: rgba(var(--ion-color-primary-rgb), 0.06);
+}
+
+/* ---------------------------------------------------------------- Responsive containment
+ * The app is Android-first, but it also runs in a plain browser (web preview / demo) and on
+ * tablets, foldables and wide phones. Without a cap the single-column layout stretches edge to
+ * edge and looks broken. Constrain the scrollable content AND the (footer-hosted) sticky action
+ * bar to one centred phone-width column on anything wider than a phone; the dark app background
+ * fills the gutters so it reads as an intentional centred app, not a stretched page. */
+@media (min-width: 620px) {
+  ion-content::part(scroll) {
+    max-width: 600px;
+    margin-inline: auto;
+  }
+
+  .pc-sticky-bar {
+    max-width: 600px;
+    margin-inline: auto;
+    border-radius: var(--pc-radius-md) var(--pc-radius-md) 0 0;
+  }
+
+  .pc-brand {
+    max-width: 600px;
+    margin-inline: auto;
+    width: 100%;
   }
 }

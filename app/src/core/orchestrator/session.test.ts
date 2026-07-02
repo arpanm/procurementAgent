@@ -193,6 +193,13 @@ describe("session reducer", () => {
     expect(s.approved).toBe(false);
   });
 
+  it("ModifyRequested change-qty to zero drops the line (never orders a coerced 1 pack)", () => {
+    let s = hydrate("s1", logToApproval());
+    s = apply(s, { type: "ModifyRequested", change: { kind: "change-qty", itemName: "potato", qty: 0 } });
+    // Dialing to 0 must remove the item entirely — not leave a qty-0 line that reconciles back up to 1.
+    expect(s.items.find((i) => i.name === "potato")).toBeUndefined();
+  });
+
   it("ModifyRequested swap-platform pins the item to a platform", () => {
     let s = hydrate("s1", logToApproval());
     s = apply(s, {

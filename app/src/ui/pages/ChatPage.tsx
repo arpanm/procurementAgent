@@ -36,8 +36,31 @@ import {
   summarize,
 } from "../../core/intent/itemListModel";
 import { NoopSpeechInput, type SpeechInput } from "../../core/intent/speech";
-import { getStrings, langFromLocale } from "../../core/intent/strings";
+import {
+  getStrings,
+  type Lang,
+  langFromLocale,
+  SUPPORTED_LANGS,
+} from "../../core/intent/strings";
 import { BrandHeader } from "../components/BrandHeader";
+
+/** Persisted UI-language key + the BCP-47 locale / native name for each supported language. */
+const LANG_KEY = "pc.lang";
+const LANG_LOCALE: Record<Lang, string> = { en: "en-IN", hi: "hi-IN", bn: "bn-IN" };
+const LANG_NAMES: Record<Lang, string> = { en: "English", hi: "हिन्दी", bn: "বাংলা" };
+
+/** Initial language: explicit prop → persisted choice → device language → English. */
+function initialLang(localeProp?: string): Lang {
+  if (localeProp) return langFromLocale(localeProp);
+  try {
+    const saved = globalThis.localStorage?.getItem(LANG_KEY);
+    if (saved) return langFromLocale(saved);
+  } catch {
+    /* ignore */
+  }
+  const nav = typeof navigator !== "undefined" ? navigator.language : undefined;
+  return langFromLocale(nav);
+}
 
 export interface ChatPageProps {
   /** Injected for testing; defaults to an HTTP-backed client. */
@@ -89,7 +112,19 @@ export function ChatPage({
   }
   const speechInput = speech ?? speechRef.current;
 
-  const strings = useMemo(() => getStrings(langFromLocale(locale)), [locale]);
+  // UI language: a persisted, user-selectable choice (seeded from the prop / device language). Drives
+  // both the on-screen strings and the locale sent to the intent parser + speech recognizer.
+  const [lang, setLang] = useState<Lang>(() => initialLang(locale));
+  const strings = useMemo(() => getStrings(lang), [lang]);
+  const effectiveLocale = LANG_LOCALE[lang];
+  const micAvailable = speechInput.isAvailable;
+  useEffect(() => {
+    try {
+      globalThis.localStorage?.setItem(LANG_KEY, lang);
+    } catch {
+      /* private mode / no storage → in-memory only */
+    }
+  }, [lang]);
 
   const [text, setText] = useState("");
   const [items, setItems] = useState<readonly RequestedItem[]>([]);
@@ -123,7 +158,7 @@ export function ChatPage({
     setErrorDetail(null);
     setStatusNote(null);
     try {
-      const result = await client.parseWithConfidence(trimmed, locale);
+      const result = await client.parseWithConfidence(trimmed, effectiveLocale);
       setItems(result.items);
       if (result.items.length === 0) {
         setStatusNote(strings.noItemsFound);
@@ -139,18 +174,18 @@ export function ChatPage({
     } finally {
       setIsParsing(false);
     }
-  }, [client, isParsing, locale, strings, text]);
+  }, [client, effectiveLocale, isParsing, strings, text]);
 
   const handleMicDown = useCallback(async () => {
     setErrorNote(null);
     setIsListening(true);
     try {
-      await speechInput.start(locale);
+      await speechInput.start(effectiveLocale);
     } catch {
       setIsListening(false);
       setErrorNote(strings.errorParsing);
     }
-  }, [locale, speechInput, strings]);
+  }, [effectiveLocale, speechInput, strings]);
 
   const handleMicUp = useCallback(async () => {
     if (!isListening) {
@@ -203,6 +238,22 @@ export function ChatPage({
     <IonPage>
       <BrandHeader title={strings.title} subtitle={strings.tagline} />
       <IonContent className="ion-padding pc-content">
+        <div className="pc-lang-row">
+          <IonSelect
+            className="pc-lang-select"
+            data-testid="lang-select"
+            aria-label="Language"
+            interface="popover"
+            value={lang}
+            onIonChange={(event) => setLang(event.detail.value as Lang)}
+          >
+            {SUPPORTED_LANGS.map((l) => (
+              <IonSelectOption key={l} value={l}>
+                {LANG_NAMES[l]}
+              </IonSelectOption>
+            ))}
+          </IonSelect>
+        </div>
         <div className="pc-composer">
           <IonInput
             className="pc-composer__input"
@@ -212,19 +263,21 @@ export function ChatPage({
             value={text}
             onIonInput={(event) => setText(event.detail.value ?? "")}
           />
-          <IonButton
-            className={`pc-iconbtn${isListening ? " pc-mic--listening" : ""}`}
-            data-testid="mic-button"
-            aria-label={isListening ? strings.micStop : strings.micStart}
-            aria-pressed={isListening}
-            fill="clear"
-            color={isListening ? "danger" : "medium"}
-            onPointerDown={handleMicDown}
-            onPointerUp={handleMicUp}
-            onPointerLeave={handleMicUp}
-          >
-            <MicGlyph />
-          </IonButton>
+          {micAvailable ? (
+            <IonButton
+              className={`pc-iconbtn${isListening ? " pc-mic--listening" : ""}`}
+              data-testid="mic-button"
+              aria-label={isListening ? strings.micStop : strings.micStart}
+              aria-pressed={isListening}
+              fill="clear"
+              color={isListening ? "danger" : "medium"}
+              onPointerDown={handleMicDown}
+              onPointerUp={handleMicUp}
+              onPointerLeave={handleMicUp}
+            >
+              <MicGlyph />
+            </IonButton>
+          ) : null}
           <IonButton
             className="pc-sendbtn"
             data-testid="send-button"
@@ -237,7 +290,7 @@ export function ChatPage({
           </IonButton>
         </div>
 
-        {isListening ? (
+        {isListening && micAvailable ? (
           <div className="pc-listening-note" data-testid="listening-note">
             <span className="pc-listening-dot" />
             <IonNote color="danger">{strings.listening}</IonNote>

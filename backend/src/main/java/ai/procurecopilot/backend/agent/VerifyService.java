@@ -38,55 +38,75 @@ public class VerifyService {
         List<CartItem> actual = request == null || request.actual() == null
                 ? List.of() : request.actual();
 
-        // Index the live cart by SKU; later duplicates overwrite (a cart should not list a SKU twice).
-        Map<String, CartItem> actualBySku = new LinkedHashMap<>();
-        for (CartItem a : actual) {
-            if (a == null) {
-                continue;
-            }
-            actualBySku.put(sku(a), a);
-        }
+        // Aggregate BOTH sides by SKU (summing quantities) before comparing. A cart or plan may list the
+        // same SKU on more than one line; collapsing to a single entry (last-wins) would let a wrong total
+        // slip through this safety gate — e.g. plan 2×A + 3×A (=5) vs a cart with one 2×A line would
+        // wrongly pass. Summing per SKU compares the real totals.
+        Map<String, Agg> expectedBySku = aggregate(expected);
+        Map<String, Agg> actualBySku = aggregate(actual);
 
-        Map<String, Boolean> matchedActual = new LinkedHashMap<>();
-        for (CartItem e : expected) {
-            if (e == null) {
-                continue;
-            }
-            String skuId = sku(e);
-            CartItem a = actualBySku.get(skuId);
+        for (Map.Entry<String, Agg> entry : expectedBySku.entrySet()) {
+            String skuId = entry.getKey();
+            Agg e = entry.getValue();
+            Agg a = actualBySku.get(skuId);
             if (a == null) {
                 mismatches.add(String.format(
                         "Missing SKU %s: expected %d @ %s, not in cart",
-                        skuId, e.qty(), Money.formatRupees(e.unitPricePaise())));
+                        skuId, e.qty, Money.formatRupees(e.unitPricePaise)));
                 continue;
             }
-            matchedActual.put(skuId, Boolean.TRUE);
-            if (a.qty() != e.qty()) {
+            if (a.qty != e.qty) {
                 mismatches.add(String.format(
                         "Quantity mismatch for SKU %s: expected %d, cart has %d",
-                        skuId, e.qty(), a.qty()));
+                        skuId, e.qty, a.qty));
             }
-            if (priceDriftExceedsTolerance(e.unitPricePaise(), a.unitPricePaise())) {
+            if (priceDriftExceedsTolerance(e.unitPricePaise, a.unitPricePaise)) {
                 mismatches.add(String.format(
                         "Price drift for SKU %s: expected %s, cart has %s (beyond %.0f%% tolerance)",
                         skuId,
-                        Money.formatRupees(e.unitPricePaise()),
-                        Money.formatRupees(a.unitPricePaise()),
+                        Money.formatRupees(e.unitPricePaise),
+                        Money.formatRupees(a.unitPricePaise),
                         priceTolerance * 100));
             }
         }
 
         // Anything in the cart not in the approved plan is an unexpected addition — block it.
-        for (Map.Entry<String, CartItem> entry : actualBySku.entrySet()) {
-            if (!matchedActual.containsKey(entry.getKey())) {
-                CartItem a = entry.getValue();
+        for (Map.Entry<String, Agg> entry : actualBySku.entrySet()) {
+            if (!expectedBySku.containsKey(entry.getKey())) {
+                Agg a = entry.getValue();
                 mismatches.add(String.format(
                         "Unexpected SKU %s in cart: %d @ %s not in approved plan",
-                        entry.getKey(), a.qty(), Money.formatRupees(a.unitPricePaise())));
+                        entry.getKey(), a.qty, Money.formatRupees(a.unitPricePaise)));
             }
         }
 
         return new VerifyResponse(mismatches.isEmpty(), mismatches);
+    }
+
+    /** Per-SKU aggregate: total quantity across duplicate lines + the SKU's unit price. */
+    private static final class Agg {
+        private long qty;
+        private long unitPricePaise;
+    }
+
+    /**
+     * Fold a list of cart lines into one {@link Agg} per SKU, summing quantities. The unit price is taken
+     * from the first line seen for that SKU (a SKU has a single unit price; per-line duplicates repeat it).
+     */
+    private static Map<String, Agg> aggregate(List<CartItem> items) {
+        Map<String, Agg> bySku = new LinkedHashMap<>();
+        for (CartItem item : items) {
+            if (item == null) {
+                continue;
+            }
+            Agg agg = bySku.computeIfAbsent(sku(item), k -> {
+                Agg fresh = new Agg();
+                fresh.unitPricePaise = item.unitPricePaise();
+                return fresh;
+            });
+            agg.qty += item.qty();
+        }
+        return bySku;
     }
 
     private boolean priceDriftExceedsTolerance(long expectedPaise, long actualPaise) {

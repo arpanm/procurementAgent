@@ -14,6 +14,17 @@ services:
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
       ANTHROPIC_VERSION: ${ANTHROPIC_VERSION:-2023-06-01}
       ANTHROPIC_MAX_TOKENS: ${ANTHROPIC_MAX_TOKENS:-2048}
+      # Persist the H2 file DB to the mounted volume (writable by appuser; see Dockerfile).
+      SPRING_DATASOURCE_URL: ${SPRING_DATASOURCE_URL:-jdbc:h2:file:/app/data/procure}
+      # LLM provider — set LLM_PROVIDER=ollama for a free local model (no Anthropic key). The container
+      # reaches the host's Ollama via host.docker.internal (mapped below).
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen2.5vl:7b}
+    extra_hosts:
+      # Lets the container resolve the host machine (where `ollama serve` runs) on Linux + Mac/Windows.
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
       interval: 15s
@@ -21,3 +32,10 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    volumes:
+      # Durable storage for the embedded H2 DB (knowledge docs, eval runs, pending patches,
+      # failure log) so state survives `docker compose down/up` and redeploys.
+      - procure-data:/app/data
+
+volumes:
+  procure-data:

@@ -31,6 +31,7 @@ import {
   amazonProductUrl,
   asinFromUrl,
   findAmazonResultCard,
+  findQuantitySelect,
 } from "./selectors";
 import { extractAmazonDetail } from "./detailExtract";
 
@@ -160,7 +161,28 @@ export class AmazonAgent implements PlatformAgent {
 
     try {
       await this.session.open(productUrl, { hidden: this.hidden });
-      const obs = await this.session.observe();
+      let obs = await this.session.observe();
+
+      // Amazon's native "Add to Cart" adds however many the quantity dropdown has selected — a bare
+      // click adds exactly 1. So set the quantity first, then read it back and only ever report the
+      // count actually reflected on the page (never blindly the requested qty).
+      let effectiveQty = 1;
+      if (line.qty > 1) {
+        const qtySelect = findQuantitySelect(obs);
+        if (qtySelect) {
+          const setRes = await this.session.act({
+            type: "select",
+            idx: qtySelect.idx,
+            value: String(line.qty),
+          });
+          if (setRes.ok) {
+            obs = await this.session.observe();
+            const readBack = Number(findQuantitySelect(obs)?.value ?? "1");
+            effectiveQty = Number.isFinite(readBack) && readBack > 0 ? readBack : 1;
+          }
+        }
+      }
+
       const button = findAddToCartButton(obs, this.atcMatcher);
       if (!button) {
         return {
@@ -194,12 +216,19 @@ export class AmazonAgent implements PlatformAgent {
         };
       }
 
+      // Honest quantity: the count we actually placed. When the dropdown couldn't reach the requested
+      // amount (e.g. Amazon caps the select at 30), report the partial count + a reason so the summary
+      // shows the shortfall and the user can top it up manually, rather than a silent under-order.
       return {
         status: "added",
         skuId: line.skuId,
-        qty: line.qty,
+        qty: effectiveQty,
         cartUrl: this.cartUrl,
         productUrl,
+        reason:
+          effectiveQty < line.qty
+            ? `only ${effectiveQty} of ${line.qty} could be set on the page — open the product to add the rest`
+            : undefined,
       };
     } catch (err) {
       return {

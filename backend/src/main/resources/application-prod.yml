@@ -1,0 +1,35 @@
+# Production profile — activate with SPRING_PROFILES_ACTIVE=prod.
+#
+# Fail-fast philosophy: every value below is a REQUIRED env var with NO default, so the app
+# refuses to start if a production deployment is mis-configured (blank DB password, missing
+# Anthropic key, wildcard CORS) rather than silently degrading. See also ClaudeService.isStub()
+# (hard opt-out when stub-mode=false) and CorsConfig (rejects '*' under this profile).
+spring:
+  datasource:
+    # Managed Postgres — e.g. jdbc:postgresql://db-host:5432/procure
+    url: ${SPRING_DATASOURCE_URL}
+    username: ${SPRING_DATASOURCE_USERNAME}
+    password: ${SPRING_DATASOURCE_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      # validate (not update): the schema must be provisioned by a migration (Flyway/Liquibase)
+      # or a one-off `update` run. This prevents Hibernate from silently altering prod tables.
+      ddl-auto: ${SPRING_JPA_DDL_AUTO:validate}
+    properties:
+      hibernate.dialect: org.hibernate.dialect.PostgreSQLDialect
+    open-in-view: false
+
+anthropic:
+  # No key + no stub in prod is a hard error (isStub() opts out; a blank key then fails the probe).
+  api-key: ${ANTHROPIC_API_KEY}
+  stub-mode: false
+
+procure:
+  cors:
+    # REQUIRED explicit origins in prod — never '*'. e.g. "capacitor://localhost,https://localhost"
+    allowed-origins: ${PROCURE_CORS_ALLOWED_ORIGINS}
+
+  # Bearer token required to call the backend (enforced by the security filter added in Phase 1).
+  security:
+    api-token: ${PROCURE_API_TOKEN}

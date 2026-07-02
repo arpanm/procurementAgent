@@ -5,6 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Lob;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 
 /**
@@ -31,6 +32,21 @@ public class KnowledgeDocEntity {
 
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
+
+    /**
+     * JPA optimistic-lock guard (distinct from the domain {@code version}, which is the knowledge-doc
+     * revision). Two concurrent read-modify-write cycles (a device observation racing an eval sweep on
+     * the same platform) would otherwise silently clobber each other last-writer-wins; with this, the
+     * loser's commit throws {@code OptimisticLockException} instead of dropping the other's change.
+     *
+     * <p>Deliberately a NULLABLE {@code Long}: adding a NOT NULL version column to an already-populated
+     * table via {@code ddl-auto=update} fails (existing rows can't be back-filled). A nullable column
+     * migrates cleanly, and Hibernate treats a NULL version as "unversioned" and initializes it on the
+     * next write.
+     */
+    @Version
+    @Column(name = "lock_version")
+    private Long lockVersion;
 
     protected KnowledgeDocEntity() {}
 

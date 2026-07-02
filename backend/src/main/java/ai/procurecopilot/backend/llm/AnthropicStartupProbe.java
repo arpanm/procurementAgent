@@ -1,5 +1,6 @@
 package ai.procurecopilot.backend.llm;
 
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -21,16 +22,56 @@ public class AnthropicStartupProbe {
 
     private final ClaudeService claude;
     private final AnthropicProperties props;
+    private final LlmProperties llm;
 
-    public AnthropicStartupProbe(ClaudeService claude, AnthropicProperties props) {
+    public AnthropicStartupProbe(ClaudeService claude, AnthropicProperties props, LlmProperties llm) {
         this.claude = claude;
         this.props = props;
+        this.llm = llm;
+    }
+
+    /**
+     * Fail fast if the app is told to use the live ANTHROPIC API (STUB_MODE=false) but has no key: refuse
+     * to start rather than silently serving deterministic stub data as if it were real. Skipped when the
+     * free/local Ollama provider is selected — Ollama needs no Anthropic key.
+     */
+    @PostConstruct
+    void assertLiveModeHasKey() {
+        if (llm.isOllama()) {
+            return;
+        }
+        if (props.isLiveModeMissingKey()) {
+            throw new IllegalStateException(
+                    "ANTHROPIC_STUB_MODE=false but ANTHROPIC_API_KEY is blank. Refusing to start: the "
+                    + "backend would otherwise serve fabricated stub completions as real prices. Provide a "
+                    + "valid ANTHROPIC_API_KEY, set ANTHROPIC_STUB_MODE=true for offline/dev, or set "
+                    + "LLM_PROVIDER=ollama to use a free local model.");
+        }
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void verifyModelReachable() {
         if (props.isStub()) {
             log.info("Anthropic stub mode ON — skipping live model probe");
+            return;
+        }
+        if (llm.isOllama()) {
+            String model = llm.ollamaOrDefault().visionModelOrDefault();
+            try {
+                claude.complete(new ClaudeRequest(
+                        "startup-probe", "Reply with the single word OK.", "ping", 8, null, null));
+                log.info("Ollama provider reachable ✓ ({}, vision {})",
+                        llm.ollamaOrDefault().modelOrDefault(), model);
+            } catch (RuntimeException e) {
+                log.error(
+                        "\n========================================================================\n"
+                        + " Ollama is NOT reachable at {}: {}\n"
+                        + " Start it with `ollama serve` and pull the models:\n"
+                        + "   ollama pull {}   &&   ollama pull {}\n"
+                        + "========================================================================",
+                        llm.ollamaOrDefault().baseUrlOrDefault(), e.getMessage(),
+                        llm.ollamaOrDefault().modelOrDefault(), model);
+            }
             return;
         }
         try {

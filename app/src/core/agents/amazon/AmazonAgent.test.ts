@@ -173,7 +173,53 @@ describe("AmazonAgent.addToCart", () => {
     ],
   };
 
-  it("returns 'added' when the native button is clicked and the add is confirmed", async () => {
+  it("adds the requested quantity via the quantity <select>, then reports that count", async () => {
+    // Detail page with a native quantity dropdown + the ATC button.
+    const detailWithQty: Observation = {
+      ...detailWithAtc,
+      elements: [
+        el({ idx: 3, tag: "select", value: "1", attrs: { name: "quantity" }, bbox: [20, 500, 80, 40] }),
+        ...detailWithAtc.elements,
+      ],
+    };
+    // After selecting 6, the dropdown reads back "6".
+    const afterSelect: Observation = {
+      ...detailWithQty,
+      elements: detailWithQty.elements.map((e) =>
+        e.tag === "select" ? { ...e, value: "6" } : e,
+      ),
+    };
+    const confirmed: Observation = {
+      ...afterSelect,
+      elements: [
+        ...afterSelect.elements,
+        el({ idx: 9, name: "Added to Cart", bbox: [20, 100, 200, 30] }),
+        el({ idx: 10, name: "Cart subtotal (6 items): ₹1,422.00", bbox: [20, 140, 300, 30] }),
+      ],
+    };
+    const session = scriptedSession(detailWithQty);
+    session.observe = vi
+      .fn()
+      .mockResolvedValueOnce(detailWithQty) // after open(productUrl)
+      .mockResolvedValueOnce(afterSelect) // after setting quantity
+      .mockResolvedValueOnce(confirmed); // after click
+
+    const agent = new AmazonAgent({ session, cartUrl: "https://www.amazon.in/gp/cart/view.html" });
+    const result = await agent.addToCart({
+      skuId: "B018E0LQ8W",
+      qty: 6,
+      productUrl: "https://www.amazon.in/dp/B018E0LQ8W",
+    });
+
+    expect(result.status).toBe("added");
+    expect(result.qty).toBe(6); // the actual quantity set, not a blind echo
+    expect(result.reason).toBeUndefined();
+    expect(result.cartUrl).toBe("https://www.amazon.in/gp/cart/view.html");
+    expect(session.act).toHaveBeenCalledWith({ type: "select", idx: 3, value: "6" });
+    expect(session.act).toHaveBeenCalledWith({ type: "click", idx: 5 });
+  });
+
+  it("reports an honest partial (qty 1 + reason) when there is no quantity control for a qty>1 line", async () => {
     const confirmed: Observation = {
       ...detailWithAtc,
       elements: [
@@ -187,7 +233,7 @@ describe("AmazonAgent.addToCart", () => {
     const observe = vi
       .fn()
       .mockResolvedValueOnce(detailWithAtc) // after open(productUrl)
-      .mockResolvedValueOnce(confirmed); // after click
+      .mockResolvedValueOnce(confirmed); // after click (no quantity select → no extra observe)
     session.observe = observe;
 
     const agent = new AmazonAgent({ session, cartUrl: "https://www.amazon.in/gp/cart/view.html" });
@@ -198,6 +244,8 @@ describe("AmazonAgent.addToCart", () => {
     });
 
     expect(result.status).toBe("added");
+    expect(result.qty).toBe(1); // only 1 could be placed; never a silent "6 added"
+    expect(result.reason).toContain("only 1 of 6");
     expect(result.cartUrl).toBe("https://www.amazon.in/gp/cart/view.html");
     expect(session.act).toHaveBeenCalledWith({ type: "click", idx: 5 });
   });

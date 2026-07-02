@@ -16,10 +16,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
- * Durable, in-memory, append-only event store (PROCURE_COPILOT_PLAN.md §3.6.4). Each session is an
- * ordered event log that is the system of record for a procurement run; the device hydrates from it on
- * cold start (§3.6.5) and live viewers subscribe over SSE (§3.6.5). Thread-safe: per-session appends
- * are serialized so {@code seq} is monotonic and SSE delivery preserves order.
+ * In-memory, append-only session event log (PROCURE_COPILOT_PLAN.md §3.6.4). Each session is an ordered
+ * event log; live viewers subscribe over SSE (§3.6.5). Thread-safe: per-session appends are serialized so
+ * {@code seq} is monotonic and SSE delivery preserves order.
+ *
+ * <p><b>Durability &amp; scope (honest status):</b> this is the BACKEND'S working copy, not a durable
+ * system of record. Per the local-first design (§3.6), the DEVICE is the source of truth — it owns live
+ * state and re-hydrates/continues after a backend restart, and its outbox deliberately tolerates a 404
+ * for a session the backend no longer has ({@code BackendHttpError.isClientError}). Consequences:
+ * <ul>
+ *   <li>events are lost on backend restart (acceptable: the device holds the authoritative log);
+ *   <li>it is single-instance — a multi-replica deployment must either use sticky sessions or move this
+ *       to a shared store (Postgres/Redis) with shared SSE pub/sub. Deferred as a scale-up item.
+ * </ul>
  */
 @Service
 public class SessionStore {

@@ -9,6 +9,8 @@ import ai.procurecopilot.backend.llm.AnthropicProperties;
 import ai.procurecopilot.backend.llm.ClaudeRequest;
 import ai.procurecopilot.backend.llm.ClaudeResponder;
 import ai.procurecopilot.backend.llm.ClaudeService;
+import ai.procurecopilot.backend.llm.LlmProperties;
+import ai.procurecopilot.backend.llm.OllamaClient;
 import ai.procurecopilot.backend.llm.SecretScrubber;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
@@ -62,8 +64,11 @@ class RagEvalServiceTest {
 
     @BeforeEach
     void setUp() {
+        LlmProperties llm = new LlmProperties("anthropic", null);
         ClaudeService claude = new ClaudeService(
                 new AnthropicProperties("http://localhost", "", "2023-06-01", "model", 2048, true),
+                llm,
+                new OllamaClient(llm, mapper, WebClient.builder()),
                 new SecretScrubber(),
                 mapper,
                 List.of(responder),

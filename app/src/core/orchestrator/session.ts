@@ -184,6 +184,13 @@ function applyModify(
   switch (change.kind) {
     case "change-qty": {
       const qty = Math.max(0, Math.round(change.qty));
+      // Dialing the quantity down to zero means "remove this line" — the natural gesture. Keeping a
+      // qty-0 item would let quantityReconcile coerce it back up to 1 pack (Math.max(1, …)) and
+      // silently order+charge for a pack the retailer tried to remove. So drop it, mirroring drop-item.
+      if (qty <= 0) {
+        const items = state.items.filter((item) => item.name !== change.itemName);
+        return { items, pins: state.pins, quotes: state.quotes };
+      }
       const items = state.items.map((item) =>
         item.name === change.itemName ? { ...item, qty } : item,
       );
